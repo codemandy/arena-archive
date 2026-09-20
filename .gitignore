@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local archive output and downloaded media
+archive.db
+archive.db-*
+assets/
+
+# Local runtime logs
+*.log
