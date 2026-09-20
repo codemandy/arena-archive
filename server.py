@@ -29,8 +29,7 @@ def layout(title: str, body: str) -> str:
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>{esc(title)} · Are.na archive</title><link rel='stylesheet' href='/style.css'></head>
-<body><header class='topbar'><a class='wordmark' href='/'>ARE.NA <span>ARCHIVE</span></a><nav class='main-nav'><a href='/'>CHANNELS</a></nav>
-<form action='/search'><input name='q' placeholder='Search archive' aria-label='Search archive'></form></header>
+<body><header class='topbar'><a class='wordmark' href='/'>ARE.NA <span>ARCHIVE</span></a><nav class='main-nav'><a href='/'>CHANNELS</a></nav></header>
 <main>{body}</main><div class='modal' id='post-modal' hidden role='dialog' aria-modal='true' aria-label='Post detail'>
 <div class='modal-backdrop' data-close-modal></div><section class='modal-panel'>
 <button class='modal-close' type='button' data-close-modal aria-label='Close post'>CLOSE ×</button>
@@ -64,6 +63,22 @@ document.addEventListener('click', (event) => {{
   modal.querySelector('.modal-close').focus();
 }});
 document.addEventListener('keydown', (event) => {{ if (event.key === 'Escape' && !modal.hidden) closeModal(); }});
+const liveSearch = document.getElementById('archive-search');
+const channelCount = document.getElementById('channel-count');
+if (liveSearch && channelCount) {{
+  const cards = [...document.querySelectorAll('.channel-card')];
+  const total = cards.length;
+  liveSearch.addEventListener('input', () => {{
+    const term = liveSearch.value.trim().toLowerCase();
+    let visible = 0;
+    cards.forEach((card) => {{
+      const match = !term || card.textContent.toLowerCase().includes(term);
+      card.hidden = !match;
+      if (match) visible += 1;
+    }});
+    channelCount.textContent = `${{visible}} of ${{total}} channels`;
+  }});
+}}
 </script></body></html>"""
 
 
@@ -291,9 +306,9 @@ class Handler(BaseHTTPRequestHandler):
         empty = '<div class="notice">No channels imported yet.</div>'
         next_abc_direction = "desc" if sort == "abc" and not category and direction == "ASC" else "asc"
         category_links = "".join(f"<a class='{('active' if row['name'] == category else '')}' href='/?sort=category&direction=asc&category={quote(row['name'])}'>{esc(row['name'])}</a>" for row in categories)
-        view = f"<section class='view-panel'><p class='eyebrow'>VIEW</p><nav class='view-tabs'><a class='{('active' if not category else '')}' href='/view?sort=abc&direction=asc'>ALL</a><a class='{('active' if sort == 'abc' and not category else '')}' href='/view?sort=abc&direction={next_abc_direction}'>ABC {'↓' if sort == 'abc' and direction == 'DESC' else '↑'}</a><a class='{('active' if sort == 'newest' and not category else '')}' href='/view?sort=newest&direction=desc'>NEWEST</a></nav><div class='category-links'>{category_links or '<span>NO CATEGORIES</span>'}</div><form method='post' action='/create-category' class='category-form'><input name='category' placeholder='New category' required><button type='submit'>CREATE CATEGORY</button></form></section>"
-        create = "<section class='editor-panel'><p class='eyebrow'>LOCAL EDITING</p><form method='post' action='/create-channel' class='editor-form'><input name='title' placeholder='New channel title' required><input name='description' placeholder='Description'><input name='category' placeholder='Category'><button type='submit'>CREATE CHANNEL</button></form></section>"
-        self.send_html(layout("Channels", f"<section class='hero'><p class='eyebrow'>PERSONAL ARCHIVE</p><h1>Your channels.</h1></section>{view}{create}<section class='channel-grid'>{cards or empty}</section>"))
+        view = f"<section class='view-panel'><p class='eyebrow'>VIEW</p><nav class='view-tabs'><a class='{('active' if not category else '')}' href='/view?sort=abc&direction=asc'>ALL</a><a class='{('active' if sort == 'abc' and not category else '')}' href='/view?sort=abc&direction={next_abc_direction}'>ABC {'↓' if sort == 'abc' and direction == 'DESC' else '↑'}</a><a class='{('active' if sort == 'newest' and not category else '')}' href='/view?sort=newest&direction=desc'>NEWEST</a></nav><div class='category-links'>{category_links or '<span>NO CATEGORIES</span>'}</div><div class='view-actions'><form method='get' action='/search' role='search' class='search-form'><label class='sr-only' for='archive-search'>Search archive</label><input id='archive-search' name='q' type='search' placeholder='Search archive semantically' autocomplete='off'><button type='submit'>SEARCH</button></form></div></section>"
+        create = "<section class='editor-panel'><p class='eyebrow'>EDITING</p><div class='editing-actions'><form method='post' action='/create-channel' class='editor-form'><input name='title' placeholder='New channel title' required><input name='description' placeholder='Description'><input name='category' placeholder='Category'><button type='submit'>CREATE CHANNEL</button></form><form method='post' action='/create-category' class='category-form'><input name='category' placeholder='New category' required><button type='submit'>CREATE CATEGORY</button></form></div></section>"
+        self.send_html(layout("Channels", f"<section class='hero'><p class='eyebrow'>PERSONAL ARCHIVE</p><h1>Your channels.</h1><p id='channel-count'>{len(channels)} channels</p></section>{view}{create}<section class='channel-grid'>{cards or empty}</section>"))
 
     def view(self, query_string: str) -> None:
         self.redirect("/?" + query_string if query_string else "/")
