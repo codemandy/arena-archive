@@ -25,9 +25,10 @@ SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS channels (
   id INTEGER PRIMARY KEY, slug TEXT NOT NULL, title TEXT NOT NULL,
-  description TEXT, visibility TEXT, created_at TEXT, updated_at TEXT,
+  description TEXT, visibility TEXT, category TEXT NOT NULL DEFAULT '', created_at TEXT, updated_at TEXT,
   raw_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS blocks (
   id INTEGER PRIMARY KEY, type TEXT NOT NULL, title TEXT, content TEXT,
   description TEXT, author_name TEXT, author_slug TEXT, source_url TEXT,
@@ -194,6 +195,10 @@ def import_archive(profile: str, database: Path, assets: Path, client: ArenaClie
     assets.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(database)
     db.executescript(SCHEMA)
+    try:
+        db.execute("ALTER TABLE channels ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
     # This is a one-time archive: rerunning should produce a clean snapshot.
     db.executescript("DELETE FROM channel_blocks; DELETE FROM assets; DELETE FROM blocks; DELETE FROM channels;")
     for old_asset in assets.iterdir():
@@ -228,10 +233,10 @@ def import_archive(profile: str, database: Path, assets: Path, client: ArenaClie
     for channel in channels:
         channel_id = int(channel["id"])
         db.execute(
-            "INSERT OR REPLACE INTO channels VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO channels (id, slug, title, description, visibility, category, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (channel_id, text(channel.get("slug")), text(channel.get("title")),
              text(channel.get("description")), text(channel.get("visibility") or channel.get("status")),
-             text(channel.get("created_at")), text(channel.get("updated_at")), json.dumps(channel)),
+             "", text(channel.get("created_at")), text(channel.get("updated_at")), json.dumps(channel)),
         )
         try:
             contents = client.pages(f"/channels/{channel_id}/contents")
