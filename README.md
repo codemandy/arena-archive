@@ -15,6 +15,10 @@ The importer stores `archive.db` and downloaded files under `assets/`. Set
 `ARENA_TOKEN` enables importing channels visible to that account, including
 private channels. Keep the resulting archive local.
 
+Images dropped into a channel are stored under
+`assets/channels/<channel-id>/`. Browsers provide a copy of a local file to a
+web app, so the original file on your computer is not moved or deleted.
+
 The API importer spaces requests and retries HTTP 429 responses using
 Are.na's `Retry-After` value. With a personal read token, it uses the V3
 `scope=my` search to find your full channel set, including private channels.
