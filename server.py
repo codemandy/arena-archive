@@ -130,6 +130,13 @@ document.addEventListener('click', (event) => {{
 }});
 document.addEventListener('keydown', (event) => {{ if (event.key === 'Escape' && !modal.hidden) closeModal(); }});
 document.addEventListener('dragstart', (event) => {{
+  const channel = event.target.closest('[data-draggable-channel]');
+  if (channel) {{
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('application/x-archive-channel', channel.dataset.draggableChannel);
+    document.body.classList.add('dragging');
+    return;
+  }}
   const block = event.target.closest('[data-draggable-block]');
   if (!block) return;
   event.dataTransfer.effectAllowed = 'copy';
@@ -186,10 +193,16 @@ document.addEventListener('drop', async (event) => {{
     if (!uploaded) {{ alert('No image files were added.'); return; }}
     if (copyOnly) alert(`${{uploaded}} image(s) archived; some originals could not be moved.`);
     window.location.reload();
+  }} else if (event.dataTransfer.types.includes('application/x-archive-channel')) {{
+    const channelId = event.dataTransfer.getData('application/x-archive-channel');
+    if (channelId === target.dataset.dropChannel) return;
+    const response = await fetch('/connect-channel', {{ method: 'POST', headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }}, body: new URLSearchParams({{ source_id: channelId, channel_id: target.dataset.dropChannel }}) }});
+    if (response.ok) window.location.reload(); else alert('Could not add the channel.');
   }} else {{
     const blockId = event.dataTransfer.getData('text/plain');
+    if (!/^-?\\d+$/.test(blockId)) return;
     const response = await fetch('/connect-block', {{ method: 'POST', headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }}, body: new URLSearchParams({{ block_id: blockId, channel_id: target.dataset.dropChannel }}) }});
-    if (response.ok) window.location.reload();
+    if (response.ok) window.location.reload(); else alert('Could not add the block.');
   }}
 }});
 const liveSearch = document.getElementById('archive-search');
@@ -214,10 +227,11 @@ if (liveSearch && channelCount) {{
 def db():
     connection = sqlite3.connect(DATABASE)
     connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("ALTER TABLE channels ADD COLUMN category TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
+    for column in ("category TEXT NOT NULL DEFAULT ''", "favorite INTEGER NOT NULL DEFAULT 0"):
+        try:
+            connection.execute(f"ALTER TABLE channels ADD COLUMN {column}")
+        except sqlite3.OperationalError:
+            pass
     connection.execute("CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY)")
     connection.execute("INSERT OR IGNORE INTO categories(name) SELECT category FROM channels WHERE category IS NOT NULL AND category != ''")
     connection.commit()
@@ -341,6 +355,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.create_channel(values)
             elif self.path == "/update-channel":
                 self.update_channel(values)
+            elif self.path == "/rename-channel":
+                self.rename_channel(values)
             elif self.path == "/create-block":
                 self.create_block(values)
             elif self.path == "/create-category":
@@ -349,8 +365,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.remove_block(values)
             elif self.path == "/connect-block":
                 self.connect_block(values)
+            elif self.path == "/connect-channel":
+                self.connect_channel(values)
             elif self.path == "/delete-channel":
                 self.delete_channel(values)
+            elif self.path == "/toggle-favorite":
+                self.toggle_favorite(values)
             else:
                 self.send_error(404)
         except (sqlite3.Error, ValueError, OSError) as error:
@@ -385,6 +405,18 @@ class Handler(BaseHTTPRequestHandler):
         connection.execute("UPDATE channels SET category = ?, updated_at = ? WHERE id = ?", (category, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), channel_id))
         if category:
             connection.execute("INSERT OR IGNORE INTO categories(name) VALUES (?)", (category,))
+        connection.commit()
+        connection.close()
+        self.redirect(f"/channel/{channel_id}")
+
+    def rename_channel(self, values: dict[str, list[str]]) -> None:
+        channel_id = int(form_value(values, "channel_id"))
+        title = form_value(values, "title")
+        if not title:
+            raise ValueError("channel name cannot be empty")
+        connection = db()
+        connection.execute("UPDATE channels SET title = ?, updated_at = ? WHERE id = ?", (title, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), channel_id))
+        connection.execute("UPDATE blocks SET title = ? WHERE type = 'channel' AND source_url = ?", (title, f"/channel/{channel_id}"))
         connection.commit()
         connection.close()
         self.redirect(f"/channel/{channel_id}")
@@ -445,6 +477,30 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
+    def connect_channel(self, values: dict[str, list[str]]) -> None:
+        source_id = int(form_value(values, "source_id"))
+        channel_id = int(form_value(values, "channel_id"))
+        if source_id == channel_id:
+            raise ValueError("a channel cannot contain itself")
+        connection = db()
+        source = connection.execute("SELECT title, slug FROM channels WHERE id = ?", (source_id,)).fetchone()
+        if not source or not connection.execute("SELECT 1 FROM channels WHERE id = ?", (channel_id,)).fetchone():
+            raise ValueError("channel not found")
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # Nested channels are 'channel' blocks that link to the channel page; reuse one if it exists.
+        existing = connection.execute("SELECT id FROM blocks WHERE type = 'channel' AND source_url = ?", (f"/channel/{source_id}",)).fetchone()
+        if existing:
+            block_id = existing["id"]
+        else:
+            block_id = local_id(connection, "blocks")
+            connection.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "channel", source["title"] or source["slug"], "", "", "Local archive", "local", f"/channel/{source_id}", now, now, json.dumps({"local": True, "channel_id": source_id})))
+        position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
+        connection.execute("INSERT OR IGNORE INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, json.dumps({"local": True, "connected_at": now})))
+        connection.commit()
+        connection.close()
+        self.send_response(204)
+        self.end_headers()
+
     def upload_image(self, body: bytes) -> None:
         content_type = self.headers.get("Content-Type", "")
         if not content_type.startswith("multipart/form-data"):
@@ -487,11 +543,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
+    def toggle_favorite(self, values: dict[str, list[str]]) -> None:
+        channel_id = int(form_value(values, "channel_id"))
+        connection = db()
+        connection.execute("UPDATE channels SET favorite = 1 - favorite WHERE id = ?", (channel_id,))
+        connection.commit()
+        connection.close()
+        next_url = form_value(values, "next")
+        self.redirect(next_url if next_url.startswith("/") and not next_url.startswith("//") else f"/channel/{channel_id}")
+
     def delete_channel(self, values: dict[str, list[str]]) -> None:
         channel_id = int(form_value(values, "channel_id"))
         connection = db()
         block_ids = [row[0] for row in connection.execute("SELECT block_id FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchall()]
+        nested = [row[0] for row in connection.execute("SELECT id FROM blocks WHERE type = 'channel' AND source_url = ?", (f"/channel/{channel_id}",)).fetchall()]
+        connection.execute("DELETE FROM channel_blocks WHERE channel_id = ?", (channel_id,))
+        connection.executemany("DELETE FROM channel_blocks WHERE block_id = ?", [(block_id,) for block_id in nested])
         connection.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+        block_ids += nested
         for block_id in block_ids:
             cleanup_block(connection, block_id)
         connection.commit()
@@ -502,19 +571,31 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(query_string)
         sort = params.get("sort", ["abc"])[0]
         category = params.get("category", [""])[0]
+        favorites_only = params.get("favorites", [""])[0] == "1"
         direction = "DESC" if params.get("direction", ["asc"])[0].lower() == "desc" else "ASC"
         order = {"newest": f"COALESCE(c.updated_at, '') {direction}, lower(c.title) ASC", "category": f"lower(c.category) {direction}, lower(c.title) ASC", "abc": f"lower(c.title) {direction}"}.get(sort, "lower(c.title) ASC")
         connection = db()
-        where = "WHERE c.category = ?" if category else ""
+        conditions = (["c.category = ?"] if category else []) + (["c.favorite = 1"] if favorites_only else [])
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
         values = (category,) if category else ()
         channels = connection.execute(f"SELECT c.*, COUNT(cb.block_id) AS block_count FROM channels c LEFT JOIN channel_blocks cb ON cb.channel_id = c.id {where} GROUP BY c.id ORDER BY {order}", values).fetchall()
         categories = connection.execute("SELECT name FROM categories ORDER BY lower(name)").fetchall()
+        favorites = connection.execute("SELECT id, title, slug FROM channels WHERE favorite = 1 ORDER BY lower(title)").fetchall()
         connection.close()
-        cards = "".join(f"<a class='channel-card' href='/channel/{row['id']}' data-drop-channel='{row['id']}'><span class='eyebrow category-chip' data-category-link data-category-url='/?sort=category&direction=asc&category={quote(row['category'] or '')}'>{esc(row['category'] or 'UNCATEGORIZED').upper()} · {row['block_count']} BLOCKS</span><h2>{title_markup(row['title'] or row['slug'])}</h2><p>{esc(row['description'])}</p></a>" for row in channels)
+        cards = "".join(f"<a class='channel-card' href='/channel/{row['id']}' data-drop-channel='{row['id']}' draggable='true' data-draggable-channel='{row['id']}'><span class='eyebrow category-chip' data-category-link data-category-url='/?sort=category&direction=asc&category={quote(row['category'] or '')}'>{'★ ' if row['favorite'] else ''}{esc(row['category'] or 'UNCATEGORIZED').upper()} · {row['block_count']} BLOCKS</span><h2>{title_markup(row['title'] or row['slug'])}</h2><p>{esc(row['description'])}</p></a>" for row in channels)
         empty = '<div class="notice">No channels imported yet.</div>'
-        next_abc_direction = "desc" if sort == "abc" and not category and direction == "ASC" else "asc"
-        category_links = "".join(f"<a class='{('active' if row['name'] == category else '')}' href='/?sort=category&direction=asc&category={quote(row['name'])}'>{esc(row['name'])}</a>" for row in categories)
-        view = f"<section class='view-panel'><p class='eyebrow'>VIEW</p><nav class='view-tabs'><a class='{('active' if not category else '')}' href='/view?sort=abc&direction=asc'>ALL</a><a class='{('active' if sort == 'abc' and not category else '')}' href='/view?sort=abc&direction={next_abc_direction}'>ABC {'↓' if sort == 'abc' and direction == 'DESC' else '↑'}</a><a class='{('active' if sort == 'newest' and not category else '')}' href='/view?sort=newest&direction=desc'>NEWEST</a></nav><div class='category-links'>{category_links or '<span>NO CATEGORIES</span>'}</div><div class='view-actions'><form method='get' action='/search' role='search' class='search-form'><label class='sr-only' for='archive-search'>Search archive</label><input id='archive-search' name='q' type='search' placeholder='Search archive semantically' autocomplete='off'><button type='submit'>SEARCH</button></form></div></section>"
+        filtered = bool(category or favorites_only)
+        favorites_param = "&favorites=1" if favorites_only else ""
+        next_abc_direction = "desc" if sort == "abc" and direction == "ASC" else "asc"
+        abc_arrow = "↓" if sort == "abc" and direction == "DESC" else "↑"
+        show_tabs = f"<a class='{('active' if not filtered else '')}' href='/view?sort={sort if sort != 'category' else 'abc'}&direction={direction.lower()}'>ALL</a><a class='{('active' if favorites_only else '')}' href='/view?sort={sort if sort != 'category' else 'abc'}&direction={direction.lower()}&favorites=1'>FAVORITES</a>"
+        sort_tabs = f"<a class='{('active' if sort == 'abc' else '')}' href='/view?sort=abc&direction={next_abc_direction}{favorites_param}'>A–Z {abc_arrow}</a><a class='{('active' if sort == 'newest' else '')}' href='/view?sort=newest&direction=desc{favorites_param}'>NEWEST</a>"
+        favorite_links = "".join(f"<a href='/channel/{row['id']}'>{title_markup(row['title'] or row['slug'])}</a>" for row in favorites) or "<em>Star a channel to pin it here</em>"
+        category_links = "".join(f"<a class='{('active' if row['name'] == category else '')}' href='/?sort=category&direction=asc&category={quote(row['name'])}'>{esc(row['name'])}</a>" for row in categories) or "<em>No categories yet</em>"
+        search = "<form method='get' action='/search' role='search' class='search-form'><label class='sr-only' for='archive-search'>Search archive</label><input id='archive-search' name='q' type='search' placeholder='Search archive' autocomplete='off'><button type='submit'>SEARCH</button></form>"
+        controls = f"<div class='view-line'><nav class='view-tabs'>{show_tabs}</nav><p class='view-label'>SORT</p><nav class='view-tabs'>{sort_tabs}</nav>{search}</div>"
+        rows = [("SHOW", controls), ("FAVORITES", f"<div class='favorite-links'>{favorite_links}</div>"), ("CATEGORIES", f"<div class='category-links'>{category_links}</div>")]
+        view = "<section class='view-panel'>" + "".join(f"<div class='view-row'><p class='view-label'>{label}</p>{content}</div>" for label, content in rows) + "</section>"
         create = "<section class='editor-panel'><p class='eyebrow'>EDITING</p><div class='editing-actions'><form method='post' action='/create-channel' class='editor-form'><input name='title' placeholder='New channel title' required><input name='description' placeholder='Description'><input name='category' placeholder='Category'><button type='submit'>CREATE CHANNEL</button></form><form method='post' action='/create-category' class='category-form'><input name='category' placeholder='New category' required><button type='submit'>CREATE CATEGORY</button></form></div></section>"
         self.send_html(layout("Channels", f"<section class='hero'><p class='eyebrow'>PERSONAL ARCHIVE</p><h1>Your channels.</h1><p id='channel-count'>{len(channels)} channels</p></section>{view}{create}<section class='channel-grid'>{cards or empty}</section>"))
 
@@ -536,9 +617,11 @@ class Handler(BaseHTTPRequestHandler):
         category_options = "<option value=''>Uncategorized</option>" + "".join(f"<option value='{esc(row['name'])}'{' selected' if row['name'] == channel['category'] else ''}>{esc(row['name'])}</option>" for row in categories)
         target_cards = "".join(f"<div class='drop-channel' data-drop-channel='{row['id']}'><span>{esc(row['category'] or 'UNCATEGORIZED').upper()}</span><strong>{title_markup(row['title'])}</strong></div>" for row in targets)
         drop_shelf = f"<details class='drop-shelf'><summary>DRAG TO ADD TO ANOTHER CHANNEL</summary><input class='drop-search' type='search' placeholder='Find a channel' oninput=\"this.parentElement.querySelectorAll('[data-drop-channel]').forEach((card) => card.hidden = !card.textContent.toLowerCase().includes(this.value.toLowerCase()))\"><div class='drop-channel-grid'>{target_cards}</div></details>"
-        editor = f"<section class='editor-panel'><p class='eyebrow'>CHANNEL CATEGORY</p><form method='post' action='/update-channel' class='editor-form'><input type='hidden' name='channel_id' value='{channel_id}'><select name='category'>{category_options}</select><input name='new_category' placeholder='Or make a new category'><button type='submit'>SAVE CATEGORY</button></form><p class='eyebrow'>ADD LOCAL BLOCK</p><form method='post' action='/create-block' class='editor-form block-editor'><input type='hidden' name='channel_id' value='{channel_id}'><select name='type'><option value='text'>Text</option><option value='link'>Link</option></select><input name='title' placeholder='Title'><textarea name='content' placeholder='Text or link description'></textarea><input name='source_url' type='url' placeholder='Source URL (for links)'><button type='submit'>ADD BLOCK</button></form></section>"
+        editor = f"<section class='editor-panel'><p class='eyebrow'>CHANNEL NAME</p><form method='post' action='/rename-channel' class='editor-form'><input type='hidden' name='channel_id' value='{channel_id}'><input name='title' value='{esc(channel['title'])}' placeholder='Channel name' required aria-label='Channel name'><button type='submit'>RENAME CHANNEL</button></form><p class='eyebrow'>CHANNEL CATEGORY</p><form method='post' action='/update-channel' class='editor-form'><input type='hidden' name='channel_id' value='{channel_id}'><select name='category'>{category_options}</select><input name='new_category' placeholder='Or make a new category'><button type='submit'>SAVE CATEGORY</button></form><p class='eyebrow'>ADD LOCAL BLOCK</p><form method='post' action='/create-block' class='editor-form block-editor'><input type='hidden' name='channel_id' value='{channel_id}'><select name='type'><option value='text'>Text</option><option value='link'>Link</option></select><input name='title' placeholder='Title'><textarea name='content' placeholder='Text or link description'></textarea><input name='source_url' type='url' placeholder='Source URL (for links)'><button type='submit'>ADD BLOCK</button></form></section>"
+        favorite_label = "★ FAVORITE" if channel["favorite"] else "☆ ADD TO FAVORITES"
+        favorite = f"<form method='post' action='/toggle-favorite'><input type='hidden' name='channel_id' value='{channel_id}'><button class='favorite-button{' is-favorite' if channel['favorite'] else ''}' type='submit' title='{'Remove from favorites' if channel['favorite'] else 'Add to favorites'}'>{favorite_label}</button></form>"
         delete = f"<form method='post' action='/delete-channel' onsubmit=\"return confirm('Delete this local channel?')\"><input type='hidden' name='channel_id' value='{channel_id}'><button class='danger-button' type='submit'>DELETE CHANNEL</button></form>"
-        body = f"<a class='back' href='/'>← ALL CHANNELS</a><section class='channel-heading'><p class='eyebrow'>CHANNEL · {esc(channel['visibility'] or 'UNKNOWN').upper()}</p><h1>{title_markup(channel['title'] or channel['slug'])}</h1><p>{esc(channel['description'])}</p>{delete}</section>{drop_shelf}{editor}<section class='block-grid' data-drop-channel='{channel_id}'>{grid or empty}</section>"
+        body = f"<a class='back' href='/'>← ALL CHANNELS</a><section class='channel-heading'><p class='eyebrow'>CHANNEL · {esc(channel['visibility'] or 'UNKNOWN').upper()}</p><h1>{title_markup(channel['title'] or channel['slug'])}</h1><p>{esc(channel['description'])}</p><div class='channel-actions'>{favorite}{delete}</div></section>{drop_shelf}{editor}<section class='block-grid' data-drop-channel='{channel_id}'>{grid or empty}</section>"
         self.send_html(layout(channel["title"], body))
 
     def search(self, query: str) -> None:
