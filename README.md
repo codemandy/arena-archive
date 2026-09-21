@@ -11,6 +11,46 @@ python3 server.py
 
 Then open <http://127.0.0.1:8765>.
 
+## Mac app
+
+`mac/build.sh` builds a native app with the free Command Line Tools
+(`xcode-select --install`). You don't need Xcode or a developer account.
+
+```bash
+./mac/build.sh --install
+```
+
+On first launch, choose the folder that has `archive.db` and `assets/` (for
+example this project folder). The app reads and writes those files in place
+and remembers the folder. Use File › Choose Archive Folder… (⌘O) to switch.
+
+## Planned: iCloud sync
+
+The goal is to sync the archive between Macs through iCloud Drive, with no
+paid developer account. `mac/ArenaArchive.swift` already has a working
+version, but it's switched off. Turn it on with
+`defaults write studio.oxoy.arena-archive useICloud -bool true`. It works like
+this:
+
+- On first launch, it copies `archive.db` and `assets/` to iCloud Drive ›
+  ArenaArchive.
+- It edits a local copy of the database in
+  `~/Library/Application Support/ArenaArchive` and writes it back to iCloud
+  every 20 seconds, before sleep, and on quit. SQLite files can't safely be
+  live-synced.
+- `lock.json` in the iCloud folder shows which Mac has the archive open. The
+  other Mac can take over or open it read-only.
+- If both Macs changed the database while out of sync, the local changes are
+  saved as `archive conflict <Mac> <date>.db`.
+
+Before relying on it:
+
+- Test it on two real Macs.
+- Decide how assets evicted by "Optimize Mac Storage" should behave.
+- Add a way to run the importer against the synced folder.
+
+## Importer
+
 The importer stores `archive.db` and downloaded files under `assets/`. Set
 `ARENA_TOKEN` enables importing channels visible to that account, including
 private channels. Keep the resulting archive local.

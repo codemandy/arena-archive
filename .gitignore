@@ -9,3 +9,4 @@ assets/
 
 # Local runtime logs
 *.log
+build/

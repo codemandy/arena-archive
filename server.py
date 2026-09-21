@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import html
 import json
-import cgi
 import hashlib
-import io
 import mimetypes
 import os
 import re
 import sqlite3
+import threading
 import time
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -20,6 +21,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 ROOT = Path(__file__).parent
 DATABASE = Path(os.getenv("ARENA_DATABASE", ROOT / "archive.db"))
 ASSETS = Path(os.getenv("ARENA_ASSETS", ROOT / "assets"))
+READ_ONLY = os.getenv("ARENA_READONLY") == "1"
 
 
 def esc(value: object) -> str:
@@ -324,6 +326,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        if READ_ONLY:
+            self.send_html(layout("Read-only", "<section class='notice'><h1>Archive is read-only</h1><p>It is open on another Mac. Quit it there, then reopen the app here to edit.</p></section>"), 403)
+            return
         if self.path == "/upload-image":
             try:
                 self.upload_image(body)
@@ -444,24 +449,26 @@ class Handler(BaseHTTPRequestHandler):
         content_type = self.headers.get("Content-Type", "")
         if not content_type.startswith("multipart/form-data"):
             raise ValueError("image upload must use multipart form data")
-        form = cgi.FieldStorage(fp=io.BytesIO(body), headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type, "CONTENT_LENGTH": str(len(body))})
-        channel_id = int(form.getvalue("channel_id", "0"))
-        image = form["image"] if "image" in form else None
-        if image is None or not getattr(image, "file", None):
+        message = BytesParser(policy=email_policy).parsebytes(f"Content-Type: {content_type}\r\n\r\n".encode() + body)
+        fields = {part.get_param("name", header="content-disposition"): part for part in message.iter_parts()}
+        channel_id = int((fields["channel_id"].get_content() if "channel_id" in fields else "0").strip() or "0")
+        image = fields.get("image")
+        if image is None or image.get_filename() is None:
             raise ValueError("image file missing")
-        image_type = image.type or mimetypes.guess_type(image.filename or "")[0] or ""
+        upload_name = image.get_filename()
+        image_type = image.get_content_type() if image.get_content_type() != "application/octet-stream" else mimetypes.guess_type(upload_name)[0] or ""
         if not image_type.startswith("image/"):
             raise ValueError("only image files are supported")
         connection = db()
         if not connection.execute("SELECT 1 FROM channels WHERE id = ?", (channel_id,)).fetchone():
             raise ValueError("channel not found")
-        data = image.file.read()
+        data = image.get_payload(decode=True) or b""
         if not data:
             raise ValueError("image file is empty")
         block_id = local_id(connection, "blocks")
         digest = hashlib.sha1(data).hexdigest()[:12]
-        suffix = Path(image.filename or "image").suffix.lower() or mimetypes.guess_extension(image_type) or ".bin"
-        original_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(image.filename or "image").name)
+        suffix = Path(upload_name or "image").suffix.lower() or mimetypes.guess_extension(image_type) or ".bin"
+        original_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(upload_name or "image").name)
         if not Path(original_name).suffix:
             original_name += suffix
         filename = f"local-{abs(block_id)}-{digest}-{original_name}"
@@ -469,7 +476,7 @@ class Handler(BaseHTTPRequestHandler):
         channel_assets.mkdir(parents=True, exist_ok=True)
         (channel_assets / filename).write_bytes(data)
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        title = Path(image.filename or "Untitled image").name
+        title = Path(upload_name or "Untitled image").name
         raw = json.dumps({"local": True, "filename": title, "created_at": now})
         position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
         connection.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "image", title, "", "", "Local archive", "local", "", now, now, raw))
@@ -544,7 +551,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_html(layout("Search", f"<section class='hero compact'><p class='eyebrow'>SEARCH</p><h1>{esc(query) or 'Search archive'}</h1><p>{len(rows)} matching blocks.</p></section><section class='block-grid'>{grid or empty}</section>"))
 
 
+def exit_with_parent(parent_pid: int) -> None:
+    while True:
+        time.sleep(2)
+        if os.getppid() != parent_pid:
+            os._exit(0)
+
+
 if __name__ == "__main__":
+    if os.getenv("ARENA_PARENT_PID"):
+        threading.Thread(target=exit_with_parent, args=(int(os.environ["ARENA_PARENT_PID"]),), daemon=True).start()
     port = int(os.getenv("PORT", "8765"))
     print(f"Serving {DATABASE} at http://127.0.0.1:{port}")
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
