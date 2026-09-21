@@ -1,12 +1,13 @@
 #!/bin/zsh
 # Builds "Are.na Archive.app" with the Command Line Tools (no Xcode needed).
 #
-#   ./mac/build.sh            build into build/
+#   ./mac/build.sh            build into build.noindex/
 #   ./mac/build.sh --install  build and copy to ~/Applications
 set -euo pipefail
 
 ROOT=${0:A:h:h}
-BUILD="$ROOT/build"
+# .noindex keeps Spotlight (and the Apps launcher) from listing the build copy.
+BUILD="$ROOT/build.noindex"
 APP="$BUILD/Are.na Archive.app"
 
 rm -rf "$APP"
