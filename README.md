@@ -24,6 +24,26 @@ On first launch, choose the folder that has `archive.db` and `assets/` (for
 example this project folder). The app reads and writes those files in place
 and remembers the folder. Use File › Choose Archive Folder… (⌘O) to switch.
 
+### Menu bar tray
+
+The app puts a tray icon in the menu bar. Drag anything onto it: files from
+Finder, images from a browser or Photos, links, or selected text. A channel
+list opens under the icon:
+
+- Drop onto a channel to file it there.
+- Drop onto the icon itself to hold it, then click a channel (or search and
+  press Return) to file everything that's held.
+
+Images become image blocks. Other files become attachment blocks. Links and
+text become link and text blocks. Recent channels and favorites are listed
+first. The list scrolls when you hover near its top or bottom edge while
+dragging.
+
+By default the archive keeps a copy and the original file stays where it is.
+Turn on "Move Files to Trash After Filing" in the tray's ⋯ menu to move
+originals to the Trash instead. Closing the archive window keeps the tray
+running; quit from the ⋯ menu or with ⌘Q.
+
 ## Planned: iCloud sync
 
 The goal is to sync the archive between Macs through iCloud Drive, with no

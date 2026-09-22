@@ -17,7 +17,7 @@ import CryptoKit
 import SQLite3
 import WebKit
 
-let appName = "Are.na Archive"
+let appName = "CHANNEL"
 let syncInterval: TimeInterval = 20
 let fm = FileManager.default
 let useICloud = UserDefaults.standard.bool(forKey: "useICloud")
@@ -342,11 +342,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var readOnly = false
     var timer: Timer?
     var titleObservation: NSKeyValueObservation?
+    var menuBar: MenuBarController!
     let work = DispatchQueue(label: "archive.sync")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMenu()
         makeWindow()
+        menuBar = MenuBarController(archiveURL: { [weak self] in self?.server?.url },
+                                    showArchive: { [weak self] in self?.showArchive(channel: $0) },
+                                    archiveChanged: { [weak self] in self?.archiveChanged(channel: $0) })
         NSApp.activate(ignoringOtherApps: true)
         try? fm.createDirectory(at: Paths.support, withIntermediateDirectories: true)
 
@@ -362,7 +366,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    // Closing the window leaves the menu bar tray running.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { window.makeKeyAndOrderFront(nil) }
+        return true
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         timer?.invalidate()
@@ -585,6 +595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = appName
+        window.isReleasedWhenClosed = false
         window.backgroundColor = NSColor(red: 0xf5 / 255, green: 0xf5 / 255, blue: 0xf0 / 255, alpha: 1)
         window.center()
         window.setFrameAutosaveName("ArchiveWindow")
@@ -615,8 +626,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func updateTitle() {
-        let page = webView.title?.replacingOccurrences(of: " · Are.na archive", with: "") ?? ""
+        let page = webView.title?.replacingOccurrences(of: " · CHANNEL", with: "") ?? ""
         window.title = (page.isEmpty ? appName : page) + (readOnly ? " — Read-Only" : "")
+    }
+
+    func showArchive(channel: Int?) {
+        if let channel, let server, window.contentView === webView {
+            webView.load(URLRequest(url: server.url.appendingPathComponent("channel/\(channel)")))
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Reloads the page after the menu bar tray added to a channel it shows.
+    func archiveChanged(channel: Int) {
+        guard window.isVisible, let path = webView.url?.path else { return }
+        if path == "/" || path == "/channel/\(channel)" { webView.reload() }
     }
 
     func showAlert(_ title: String, _ message: String) {
@@ -799,17 +824,19 @@ func makeIconSet(at directory: URL) throws {
             let tile = NSRect(x: 100 * unit, y: 100 * unit, width: 824 * unit, height: 824 * unit)
             NSColor(red: 0x11 / 255, green: 0x11 / 255, blue: 0x11 / 255, alpha: 1).setFill()
             NSBezierPath(roundedRect: tile, xRadius: 185 * unit, yRadius: 185 * unit).fill()
-            let accent = NSColor(red: 0xe6 / 255, green: 1, blue: 0x3f / 255, alpha: 1)
-            let mark = NSAttributedString(string: "A", attributes: [
-                .font: NSFont.systemFont(ofSize: 560 * unit, weight: .heavy), .foregroundColor: accent, .kern: -20 * unit,
-            ])
-            let markSize = mark.size()
-            mark.draw(at: NSPoint(x: tile.midX - markSize.width / 2, y: tile.midY - markSize.height / 2 + 40 * unit))
-            let label = NSAttributedString(string: "ARCHIVE", attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 64 * unit, weight: .medium),
-                .foregroundColor: NSColor(white: 0.96, alpha: 1), .kern: 10 * unit,
-            ])
-            label.draw(at: NSPoint(x: tile.midX - label.size().width / 2, y: tile.minY + 110 * unit))
+            // A silver "C": the glyph outline filled with a brushed-metal gradient.
+            let font = NSFont.systemFont(ofSize: 640 * unit, weight: .heavy)
+            var glyph = CGGlyph(0)
+            CTFontGetGlyphsForCharacters(font, Array("C".utf16), &glyph, 1)
+            let mark = NSBezierPath()
+            mark.move(to: .zero)
+            mark.append(withCGGlyph: glyph, in: font)
+            let bounds = mark.bounds
+            mark.transform(using: AffineTransform(translationByX: tile.midX - bounds.midX, byY: tile.midY - bounds.midY))
+            let silver = NSGradient(colorsAndLocations:
+                (NSColor(white: 0.97, alpha: 1), 0), (NSColor(white: 0.80, alpha: 1), 0.45),
+                (NSColor(white: 0.62, alpha: 1), 0.55), (NSColor(white: 0.88, alpha: 1), 1))!
+            silver.draw(in: mark, angle: -90)
             NSGraphicsContext.restoreGraphicsState()
             let name = scale == 1 ? "icon_\(size)x\(size).png" : "icon_\(size)x\(size)@2x.png"
             try rep.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent(name))
@@ -819,14 +846,19 @@ func makeIconSet(at directory: URL) throws {
 
 // MARK: - Main
 
-let arguments = CommandLine.arguments
-if arguments.count == 3 && arguments[1] == "--make-icon" {
-    try makeIconSet(at: URL(fileURLWithPath: arguments[2]))
-    exit(0)
-}
+@main
+enum Main {
+    static func main() throws {
+        let arguments = CommandLine.arguments
+        if arguments.count == 3 && arguments[1] == "--make-icon" {
+            try makeIconSet(at: URL(fileURLWithPath: arguments[2]))
+            exit(0)
+        }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.run()
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.regular)
+        app.run()
+    }
+}

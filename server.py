@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 from email.parser import BytesParser
@@ -21,6 +22,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 ROOT = Path(__file__).parent
 DATABASE = Path(os.getenv("ARENA_DATABASE", ROOT / "archive.db"))
 ASSETS = Path(os.getenv("ARENA_ASSETS", ROOT / "assets"))
+THUMBS = ASSETS.parent / "thumbs"
+THUMB_EDGE = 800
+THUMB_MIN_BYTES = 250_000
 READ_ONLY = os.getenv("ARENA_READONLY") == "1"
 
 
@@ -35,8 +39,8 @@ def title_markup(value: object) -> str:
 def layout(title: str, body: str) -> str:
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>{esc(title)} · Are.na archive</title><link rel='stylesheet' href='/style.css'></head>
-<body><header class='topbar'><a class='wordmark' href='/'>ARE.NA <span>ARCHIVE</span></a><nav class='main-nav'><a href='/'>CHANNELS</a></nav></header>
+<title>{esc(title)} · CHANNEL</title><link rel='stylesheet' href='/style.css'></head>
+<body><header class='topbar'><a class='wordmark' href='/'>CHANNEL</a><nav class='main-nav'><a href='/'>CHANNEL</a></nav></header>
 <main>{body}</main><div class='modal' id='post-modal' hidden role='dialog' aria-modal='true' aria-label='Post detail'>
 <div class='modal-backdrop' data-close-modal></div><section class='modal-panel'>
 <button class='modal-close' type='button' data-close-modal aria-label='Close post'>CLOSE ×</button>
@@ -107,6 +111,11 @@ document.addEventListener('click', (event) => {{
   if (event.target.closest('#modal-content')) return;
   const block = event.target.closest('.block');
   if (!block || event.target.closest('a, button, form')) return;
+  openBlock(block);
+}});
+let currentBlock = null;
+const openBlock = (block) => {{
+  currentBlock = block;
   const clone = block.cloneNode(true);
   const sourceTypes = ['image', 'link', 'text', 'embed'];
   const visual = clone.querySelector('.block-visual');
@@ -119,6 +128,34 @@ document.addEventListener('click', (event) => {{
     while (visual.firstChild) source.append(visual.firstChild);
     visual.append(source);
   }}
+  showClone(clone);
+  // The grid thumbnail shows instantly; the full image replaces it once decoded.
+  const image = clone.querySelector('img[data-full]');
+  if (image) {{
+    image.removeAttribute('loading');
+    loadFull(image.dataset.full).then((full) => {{ if (currentBlock === block && full) image.src = full.src; }});
+  }}
+  const blocks = visibleBlocks();
+  const index = blocks.indexOf(block);
+  for (const neighbour of [blocks[index + 1], blocks[index - 1]]) {{
+    const next = neighbour && neighbour.querySelector('img[data-full]');
+    if (next) loadFull(next.dataset.full);
+  }}
+}};
+const fullImages = new Map();
+const loadFull = (url) => {{
+  if (!fullImages.has(url)) {{
+    const full = new Image();
+    const loaded = new Promise((resolve) => {{ full.onload = () => resolve(full); full.onerror = () => resolve(null); }});
+    full.src = url;
+    // Prefer a decoded image, but never wait on decode() for long (it stalls in background windows).
+    fullImages.set(url, loaded.then((image) => image && Promise.race([image.decode().catch(() => {{}}), new Promise((resolve) => setTimeout(resolve, 250))]).then(() => image)));
+    if (fullImages.size > 12) fullImages.delete(fullImages.keys().next().value);
+  }}
+  return fullImages.get(url);
+}};
+const visibleBlocks = () => [...document.querySelectorAll('main .block')].filter((block) => block.offsetParent !== null);
+const showClone = (clone) => {{
   modalContent.replaceChildren(clone);
   modalScale = 1;
   modalPanX = 0;
@@ -127,8 +164,18 @@ document.addEventListener('click', (event) => {{
   modal.hidden = false;
   document.body.classList.add('modal-open');
   modal.querySelector('.modal-close').focus();
+}};
+const stepModal = (direction) => {{
+  const blocks = visibleBlocks();
+  const next = blocks[blocks.indexOf(currentBlock) + direction];
+  if (next) openBlock(next);
+}};
+document.addEventListener('keydown', (event) => {{
+  if (modal.hidden) return;
+  if (event.key === 'Escape') closeModal();
+  if (event.key === 'ArrowRight') {{ event.preventDefault(); stepModal(1); }}
+  if (event.key === 'ArrowLeft') {{ event.preventDefault(); stepModal(-1); }}
 }});
-document.addEventListener('keydown', (event) => {{ if (event.key === 'Escape' && !modal.hidden) closeModal(); }});
 document.addEventListener('dragstart', (event) => {{
   const channel = event.target.closest('[data-draggable-channel]');
   if (channel) {{
@@ -144,26 +191,32 @@ document.addEventListener('dragstart', (event) => {{
   document.body.classList.add('dragging');
 }});
 document.addEventListener('dragend', () => document.body.classList.remove('dragging'));
+// On a channel page, files dropped anywhere outside another drop target go into this channel.
+const pageChannel = document.querySelector('.block-grid[data-drop-channel]');
+const dropTarget = (event) => event.target.closest('[data-drop-channel]') || (event.dataTransfer.types.includes('Files') ? pageChannel : null);
+const endPageDrop = () => {{ document.body.classList.remove('page-drop'); if (pageChannel) pageChannel.classList.remove('drop-ready'); }};
 document.addEventListener('dragover', (event) => {{
   if (event.dataTransfer.types.includes('Files')) event.preventDefault();
-  const target = event.target.closest('[data-drop-channel]');
+  const target = dropTarget(event);
+  document.body.classList.toggle('page-drop', Boolean(target) && target === pageChannel && event.dataTransfer.types.includes('Files'));
   if (!target) return;
   event.preventDefault();
-  target.classList.add('drop-ready');
+  if (target !== pageChannel) target.classList.add('drop-ready');
 }});
 document.addEventListener('dragleave', (event) => {{
+  if (!event.relatedTarget) endPageDrop();
   const target = event.target.closest('[data-drop-channel]');
   if (target && !target.contains(event.relatedTarget)) target.classList.remove('drop-ready');
 }});
 document.addEventListener('drop', async (event) => {{
-  const target = event.target.closest('[data-drop-channel]');
+  const target = dropTarget(event);
+  endPageDrop();
   if (event.dataTransfer.files.length) event.preventDefault();
   if (!target) return;
   event.preventDefault();
   target.classList.remove('drop-ready');
   if (event.dataTransfer.files.length) {{
     let uploaded = 0;
-    let copyOnly = false;
     for (const [index, file] of [...event.dataTransfer.files].entries()) {{
     if (!file.type.startsWith('image/')) continue;
     let fileHandle = null;
@@ -173,7 +226,7 @@ document.addEventListener('drop', async (event) => {{
         fileHandle = await droppedItem.getAsFileSystemHandle();
         if (fileHandle && fileHandle.requestPermission) {{
           const permission = await fileHandle.requestPermission({{ mode: 'readwrite' }});
-          if (permission !== 'granted') {{ copyOnly = true; fileHandle = null; }}
+          if (permission !== 'granted') fileHandle = null;
         }}
       }} catch (error) {{
         fileHandle = null;
@@ -186,12 +239,11 @@ document.addEventListener('drop', async (event) => {{
     if (response.ok) {{
       uploaded += 1;
       if (fileHandle && fileHandle.remove) {{
-        try {{ await fileHandle.remove(); }} catch (error) {{ copyOnly = true; }}
-      }} else {{ copyOnly = true; }}
+        try {{ await fileHandle.remove(); }} catch (error) {{}}
+      }}
     }}
     }}
     if (!uploaded) {{ alert('No image files were added.'); return; }}
-    if (copyOnly) alert(`${{uploaded}} image(s) archived; some originals could not be moved.`);
     window.location.reload();
   }} else if (event.dataTransfer.types.includes('application/x-archive-channel')) {{
     const channelId = event.dataTransfer.getData('application/x-archive-channel');
@@ -207,7 +259,7 @@ document.addEventListener('drop', async (event) => {{
 }});
 const liveSearch = document.getElementById('archive-search');
 const channelCount = document.getElementById('channel-count');
-if (liveSearch && channelCount) {{
+if (liveSearch) {{
   const cards = [...document.querySelectorAll('.channel-card')];
   const total = cards.length;
   liveSearch.addEventListener('input', () => {{
@@ -218,7 +270,7 @@ if (liveSearch && channelCount) {{
       card.hidden = !match;
       if (match) visible += 1;
     }});
-    channelCount.textContent = `${{visible}} of ${{total}} channels`;
+    if (channelCount) channelCount.textContent = `${{visible}} of ${{total}} channels`;
   }});
 }}
 </script></body></html>"""
@@ -252,6 +304,8 @@ def cleanup_block(connection: sqlite3.Connection, block_id: int) -> None:
         if relative.parts and relative.parts[0] == "assets":
             relative = Path(*relative.parts[1:])
         (ASSETS / relative).unlink(missing_ok=True)
+        for suffix in (".jpg", ".png"):
+            (THUMBS / (relative.name + suffix)).unlink(missing_ok=True)
         connection.execute("DELETE FROM assets WHERE block_id = ?", (block_id,))
     connection.execute("DELETE FROM blocks WHERE id = ?", (block_id,))
 
@@ -260,12 +314,31 @@ def form_value(values: dict[str, list[str]], key: str) -> str:
     return values.get(key, [""])[0].strip()
 
 
+def thumbnail(source: Path, content_type: str) -> Path:
+    """Downscale a large image once with macOS `sips`; small images and GIFs are served as-is."""
+    if content_type == "image/gif" or source.stat().st_size < THUMB_MIN_BYTES:
+        return source
+    png = content_type == "image/png"
+    target = THUMBS / (source.name + (".png" if png else ".jpg"))
+    if target.exists():
+        return target
+    THUMBS.mkdir(parents=True, exist_ok=True)
+    scratch = target.with_name(f".{target.name}.{threading.get_ident()}")
+    result = subprocess.run(["sips", "-Z", str(THUMB_EDGE), "-s", "format", "png" if png else "jpeg", str(source), "--out", str(scratch)], capture_output=True)
+    if result.returncode or not scratch.exists():
+        scratch.unlink(missing_ok=True)
+        return source
+    scratch.replace(target)
+    return target
+
+
 def block_card(row: sqlite3.Row) -> str:
     asset = row["asset_path"]
     kind = esc(row["type"]).upper()
     source_value = esc(row["source_url"])
     if asset and row["type"] == "image":
-        visual = f"<img src='/{esc(asset)}' alt='{esc(row['title'] or row['author_name'] or kind)}' loading='lazy'>"
+        thumb = "/thumbs/" + asset.removeprefix("assets/")
+        visual = f"<img src='{esc(thumb)}' data-full='/{esc(asset)}' alt='{esc(row['title'] or row['author_name'] or kind)}' loading='lazy' decoding='async'>"
     elif asset:
         visual = f"<a class='download-block' href='/{esc(asset)}' download>DOWNLOAD {kind}<br><strong>{esc(row['title'] or 'Attached file')}</strong></a>"
     elif row["type"] == "channel":
@@ -304,20 +377,27 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if path.startswith("/assets/"):
-            relative = Path(path.removeprefix("/assets/"))
+        if path.startswith(("/assets/", "/thumbs/")):
+            relative = Path(path.split("/", 2)[2])
             if ".." in relative.parts:
                 self.send_error(400)
                 return
             target = ASSETS / relative
             if target.exists() and target.is_file():
-                data = target.read_bytes()
                 connection = db()
                 asset = connection.execute("SELECT content_type FROM assets WHERE path = ?", (str(Path("assets") / relative),)).fetchone()
                 connection.close()
+                content_type = asset["content_type"] if asset else "application/octet-stream"
+                if path.startswith("/thumbs/") and content_type.startswith("image/"):
+                    target = thumbnail(target, content_type)
+                    if target.parent == THUMBS:
+                        content_type = "image/png" if target.suffix == ".png" else "image/jpeg"
+                data = target.read_bytes()
                 self.send_response(200)
-                self.send_header("Content-Type", (asset["content_type"] if asset else "application/octet-stream"))
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
+                # Asset names carry a content hash, so the browser can keep them indefinitely.
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
                 self.end_headers()
                 self.wfile.write(data)
                 return
@@ -332,6 +412,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.search(parse_qs(parsed.query).get("q", [""])[0])
             elif path.startswith("/channel/"):
                 self.channel(int(path.rsplit("/", 1)[1]))
+            elif path == "/api/channels":
+                self.channels_json()
             else:
                 self.send_error(404)
         except (sqlite3.Error, ValueError) as error:
@@ -343,9 +425,9 @@ class Handler(BaseHTTPRequestHandler):
         if READ_ONLY:
             self.send_html(layout("Read-only", "<section class='notice'><h1>Archive is read-only</h1><p>It is open on another Mac. Quit it there, then reopen the app here to edit.</p></section>"), 403)
             return
-        if self.path == "/upload-image":
+        if self.path in ("/upload-image", "/upload-file"):
             try:
-                self.upload_image(body)
+                self.upload_file(body, images_only=self.path == "/upload-image")
             except (sqlite3.Error, ValueError, OSError) as error:
                 self.send_html(layout("Archive error", f"<section class='notice'><h1>Could not upload image</h1><p>{esc(error)}</p></section>"), 400)
             return
@@ -501,20 +583,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
-    def upload_image(self, body: bytes) -> None:
+    def upload_file(self, body: bytes, images_only: bool) -> None:
         content_type = self.headers.get("Content-Type", "")
         if not content_type.startswith("multipart/form-data"):
             raise ValueError("image upload must use multipart form data")
         message = BytesParser(policy=email_policy).parsebytes(f"Content-Type: {content_type}\r\n\r\n".encode() + body)
         fields = {part.get_param("name", header="content-disposition"): part for part in message.iter_parts()}
         channel_id = int((fields["channel_id"].get_content() if "channel_id" in fields else "0").strip() or "0")
-        image = fields.get("image")
+        image = fields.get("image") or fields.get("file")
         if image is None or image.get_filename() is None:
-            raise ValueError("image file missing")
+            raise ValueError("file missing")
         upload_name = image.get_filename()
-        image_type = image.get_content_type() if image.get_content_type() != "application/octet-stream" else mimetypes.guess_type(upload_name)[0] or ""
-        if not image_type.startswith("image/"):
+        image_type = image.get_content_type() if image.get_content_type() != "application/octet-stream" else mimetypes.guess_type(upload_name)[0] or "application/octet-stream"
+        is_image = image_type.startswith("image/")
+        if images_only and not is_image:
             raise ValueError("only image files are supported")
+        source = fields["source_url"].get_content().strip() if "source_url" in fields else ""
         connection = db()
         if not connection.execute("SELECT 1 FROM channels WHERE id = ?", (channel_id,)).fetchone():
             raise ValueError("channel not found")
@@ -535,13 +619,25 @@ class Handler(BaseHTTPRequestHandler):
         title = Path(upload_name or "Untitled image").name
         raw = json.dumps({"local": True, "filename": title, "created_at": now})
         position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
-        connection.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "image", title, "", "", "Local archive", "local", "", now, now, raw))
+        connection.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "image" if is_image else "attachment", title, "", "", "Local archive", "local", source, now, now, raw))
         connection.execute("INSERT INTO assets VALUES (?, ?, ?, ?, ?, ?)", (block_id, str(Path("assets") / "channels" / str(channel_id) / filename), "", image_type, len(data), "available"))
         connection.execute("INSERT INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, raw))
         connection.commit()
         connection.close()
         self.send_response(204)
         self.end_headers()
+
+    def channels_json(self) -> None:
+        connection = db()
+        rows = connection.execute("SELECT c.id, c.title, c.slug, c.category, c.favorite, c.updated_at, COUNT(cb.block_id) AS block_count FROM channels c LEFT JOIN channel_blocks cb ON cb.channel_id = c.id GROUP BY c.id ORDER BY lower(c.title)").fetchall()
+        connection.close()
+        channels = [{"id": row["id"], "title": row["title"] or row["slug"] or "Untitled channel", "category": row["category"] or "", "favorite": bool(row["favorite"]), "updated_at": row["updated_at"] or "", "block_count": row["block_count"]} for row in rows]
+        data = json.dumps({"channels": channels, "read_only": READ_ONLY}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def toggle_favorite(self, values: dict[str, list[str]]) -> None:
         channel_id = int(form_value(values, "channel_id"))
@@ -593,11 +689,11 @@ class Handler(BaseHTTPRequestHandler):
         favorite_links = "".join(f"<a href='/channel/{row['id']}'>{title_markup(row['title'] or row['slug'])}</a>" for row in favorites) or "<em>Star a channel to pin it here</em>"
         category_links = "".join(f"<a class='{('active' if row['name'] == category else '')}' href='/?sort=category&direction=asc&category={quote(row['name'])}'>{esc(row['name'])}</a>" for row in categories) or "<em>No categories yet</em>"
         search = "<form method='get' action='/search' role='search' class='search-form'><label class='sr-only' for='archive-search'>Search archive</label><input id='archive-search' name='q' type='search' placeholder='Search archive' autocomplete='off'><button type='submit'>SEARCH</button></form>"
-        controls = f"<div class='view-line'><nav class='view-tabs'>{show_tabs}</nav><p class='view-label'>SORT</p><nav class='view-tabs'>{sort_tabs}</nav>{search}</div>"
+        controls = f"<div class='view-line'><nav class='view-tabs'>{show_tabs}</nav><p class='view-label'>SORT</p><nav class='view-tabs'>{sort_tabs}</nav><p class='view-label channel-count' id='channel-count'>{len(channels)} channels</p>{search}</div>"
         rows = [("SHOW", controls), ("FAVORITES", f"<div class='favorite-links'>{favorite_links}</div>"), ("CATEGORIES", f"<div class='category-links'>{category_links}</div>")]
         view = "<section class='view-panel'>" + "".join(f"<div class='view-row'><p class='view-label'>{label}</p>{content}</div>" for label, content in rows) + "</section>"
         create = "<section class='editor-panel'><p class='eyebrow'>EDITING</p><div class='editing-actions'><form method='post' action='/create-channel' class='editor-form'><input name='title' placeholder='New channel title' required><input name='description' placeholder='Description'><input name='category' placeholder='Category'><button type='submit'>CREATE CHANNEL</button></form><form method='post' action='/create-category' class='category-form'><input name='category' placeholder='New category' required><button type='submit'>CREATE CATEGORY</button></form></div></section>"
-        self.send_html(layout("Channels", f"<section class='hero'><p class='eyebrow'>PERSONAL ARCHIVE</p><h1>Your channels.</h1><p id='channel-count'>{len(channels)} channels</p></section>{view}{create}<section class='channel-grid'>{cards or empty}</section>"))
+        self.send_html(layout("Channels", f"{view}{create}<section class='channel-grid'>{cards or empty}</section>"))
 
     def view(self, query_string: str) -> None:
         self.redirect("/?" + query_string if query_string else "/")
@@ -621,7 +717,7 @@ class Handler(BaseHTTPRequestHandler):
         favorite_label = "★ FAVORITE" if channel["favorite"] else "☆ ADD TO FAVORITES"
         favorite = f"<form method='post' action='/toggle-favorite'><input type='hidden' name='channel_id' value='{channel_id}'><button class='favorite-button{' is-favorite' if channel['favorite'] else ''}' type='submit' title='{'Remove from favorites' if channel['favorite'] else 'Add to favorites'}'>{favorite_label}</button></form>"
         delete = f"<form method='post' action='/delete-channel' onsubmit=\"return confirm('Delete this local channel?')\"><input type='hidden' name='channel_id' value='{channel_id}'><button class='danger-button' type='submit'>DELETE CHANNEL</button></form>"
-        body = f"<a class='back' href='/'>← ALL CHANNELS</a><section class='channel-heading'><p class='eyebrow'>CHANNEL · {esc(channel['visibility'] or 'UNKNOWN').upper()}</p><h1>{title_markup(channel['title'] or channel['slug'])}</h1><p>{esc(channel['description'])}</p><div class='channel-actions'>{favorite}{delete}</div></section>{drop_shelf}{editor}<section class='block-grid' data-drop-channel='{channel_id}'>{grid or empty}</section>"
+        body = f"<a class='back' href='/'>← BACK</a><section class='channel-heading'><p class='eyebrow'>CHANNEL · {esc(channel['visibility'] or 'UNKNOWN').upper()}</p><h1>{title_markup(channel['title'] or channel['slug'])}</h1><p>{esc(channel['description'])}</p><div class='channel-actions'>{favorite}{delete}</div></section>{drop_shelf}{editor}<section class='block-grid' data-drop-channel='{channel_id}'>{grid or empty}</section>"
         self.send_html(layout(channel["title"], body))
 
     def search(self, query: str) -> None:

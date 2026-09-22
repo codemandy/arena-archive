@@ -41,3 +41,7 @@ main { max-width: 1440px; margin: auto; padding: 0 28px 80px; }.hero { padding: 
 .view-panel .search-form { margin-left: auto; flex: 0 1 300px; gap: 6px; align-self: center; }
 .view-panel .search-form input { flex: 1; width: auto; }
 @media (max-width: 640px) { .view-row { grid-template-columns: 1fr; gap: 6px; } .view-line > .view-label { margin-left: 0; } .view-panel .search-form { margin-left: 0; flex-basis: 100%; } }
+
+.view-line > .channel-count { margin-left: auto; text-transform: uppercase; }
+.channel-count + .search-form { margin-left: 0; }
+body.page-drop::after { content: 'DROP TO ADD TO THIS CHANNEL'; position: fixed; inset: 12px; z-index: 50; display: grid; place-items: center; border: 2px dashed var(--ink); background: rgba(230,255,63,.35); font: 700 12px Arial, Helvetica, sans-serif; letter-spacing: .13em; pointer-events: none; }

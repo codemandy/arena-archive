@@ -6,6 +6,7 @@ __pycache__/
 archive.db
 archive.db-*
 assets/
+thumbs/
 
 # Local runtime logs
 *.log

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds "Are.na Archive.app" with the Command Line Tools (no Xcode needed).
+# Builds "CHANNEL.app" with the Command Line Tools (no Xcode needed).
 #
 #   ./mac/build.sh            build into build.noindex/
 #   ./mac/build.sh --install  build and copy to ~/Applications
@@ -8,13 +8,13 @@ set -euo pipefail
 ROOT=${0:A:h:h}
 # .noindex keeps Spotlight (and the Apps launcher) from listing the build copy.
 BUILD="$ROOT/build.noindex"
-APP="$BUILD/Are.na Archive.app"
+APP="$BUILD/CHANNEL.app"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos13.0" \
-  -o "$APP/Contents/MacOS/ArenaArchive" "$ROOT/mac/ArenaArchive.swift"
+  -o "$APP/Contents/MacOS/ArenaArchive" "$ROOT/mac/ArenaArchive.swift" "$ROOT/mac/MenuBar.swift"
 
 cp "$ROOT/server.py" "$ROOT/style.css" "$ROOT/arena_archive.py" "$APP/Contents/Resources/"
 
@@ -27,8 +27,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Are.na Archive</string>
-  <key>CFBundleDisplayName</key><string>Are.na Archive</string>
+  <key>CFBundleName</key><string>CHANNEL</string>
+  <key>CFBundleDisplayName</key><string>CHANNEL</string>
   <key>CFBundleIdentifier</key><string>studio.oxoy.arena-archive</string>
   <key>CFBundleExecutable</key><string>ArenaArchive</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -50,7 +50,7 @@ echo "Built $APP"
 
 if [[ "${1:-}" == "--install" ]]; then
   mkdir -p "$HOME/Applications"
-  rm -rf "$HOME/Applications/Are.na Archive.app"
+  rm -rf "$HOME/Applications/CHANNEL.app"
   cp -R "$APP" "$HOME/Applications/"
-  echo "Installed to ~/Applications/Are.na Archive.app"
+  echo "Installed to ~/Applications/CHANNEL.app"
 fi
