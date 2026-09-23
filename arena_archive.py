@@ -152,14 +152,19 @@ def source_url(item: dict) -> str:
 
 
 def media_url(item: dict) -> str:
+    # Attachments carry both a preview image and the file itself; archive the file.
+    attachment = item.get("attachment")
+    if isinstance(attachment, dict):
+        link = text(attachment.get("url") or attachment.get("src"))
+        if link:
+            return link
     image = item.get("image") or item.get("source")
     if isinstance(image, dict):
         original = image.get("original") or image.get("large") or image.get("display")
         if isinstance(original, dict):
             return text(original.get("src") or original.get("url"))
         return text(original or image.get("src") or image.get("url"))
-    attachment = item.get("attachment")
-    return text(attachment.get("src") or attachment.get("url")) if isinstance(attachment, dict) else ""
+    return ""
 
 
 def safe_filename(block_id: int, url: str, content_type: str | None) -> str:
@@ -255,7 +260,7 @@ def import_archive(profile: str, database: Path, assets: Path, client: ArenaClie
                 continue
             author = item.get("user") or item.get("owner") or {}
             db.execute(
-                "INSERT OR IGNORE INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO blocks (id, type, title, content, description, author_name, author_slug, source_url, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block_id, kind, text(item.get("title") or item.get("generated_title")),
                  text(item.get("content")), text(item.get("description")), text(author.get("full_name") or author.get("username")),
                  text(author.get("slug")), source_url(item), text(item.get("created_at")), text(item.get("updated_at")), json.dumps(item)),
@@ -287,6 +292,41 @@ def import_archive(profile: str, database: Path, assets: Path, client: ArenaClie
     return {"channels": len(channels), "blocks": counts, "omitted": omitted, "database": str(database), "assets": str(assets)}
 
 
+def repair_attachments(database: Path, assets: Path, dry_run: bool = False) -> dict:
+    """Earlier imports stored Are.na's preview image for attachment blocks.
+    Fetch the real file for any attachment whose stored asset is the preview."""
+    db = sqlite3.connect(database)
+    db.row_factory = sqlite3.Row
+    rows = db.execute("SELECT b.id, b.title, b.raw_json, a.path, a.content_type FROM blocks b JOIN assets a ON a.block_id = b.id WHERE b.type = 'attachment'").fetchall()
+    wrong = []
+    for row in rows:
+        attachment = (json.loads(row["raw_json"]).get("attachment") or {})
+        url = text(attachment.get("url") or attachment.get("src"))
+        if url and row["content_type"] != attachment.get("content_type"):
+            wrong.append((row, url))
+    if dry_run:
+        db.close()
+        return {"repairable": len(wrong), "titles": [row["title"] for row, _ in wrong]}
+    repaired, failed = 0, []
+    for row, url in wrong:
+        filename = safe_filename(row["id"], url, None)
+        target = assets / filename
+        try:
+            content_type, size, _ = download(url, target)
+        except (HTTPError, URLError, OSError, TimeoutError, RuntimeError) as error:
+            failed.append(f"{row['title']}: {error}")
+            continue
+        previous = Path(row["path"])
+        if previous.name != filename:
+            (assets / previous.name).unlink(missing_ok=True)
+        db.execute("UPDATE assets SET path = ?, source_url = ?, content_type = ?, size = ? WHERE block_id = ?",
+                   (str(Path("assets") / filename), url, content_type, size, row["id"]))
+        db.commit()
+        repaired += 1
+    db.close()
+    return {"repaired": repaired, "failed": failed}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -295,7 +335,14 @@ def main() -> None:
     command.add_argument("--database", type=Path, default=Path("archive.db"))
     command.add_argument("--assets", type=Path, default=Path("assets"))
     command.add_argument("--fixture", type=Path)
+    repair = sub.add_parser("repair-attachments")
+    repair.add_argument("--database", type=Path, default=Path("archive.db"))
+    repair.add_argument("--assets", type=Path, default=Path("assets"))
+    repair.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.command == "repair-attachments":
+        print(json.dumps(repair_attachments(args.database, args.assets, args.dry_run), indent=2))
+        return
     fixture = json.loads(args.fixture.read_text()) if args.fixture else None
     try:
         result = import_archive(args.profile, args.database, args.assets, ArenaClient(os.getenv("ARENA_TOKEN"), fixture))

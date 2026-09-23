@@ -336,7 +336,7 @@ final class Server {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
     var window: NSWindow!
-    let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+    let webView = ArchiveWebView(frame: .zero, configuration: WKWebViewConfiguration())
     let status = NSTextField(labelWithString: "Opening archive…")
     var server: Server?
     var readOnly = false
@@ -616,6 +616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func showWebView() {
+        webView.onFiles = { [weak self] urls, point in self?.fileDroppedInPage(urls, at: point) ?? false }
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -623,6 +624,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.contentView = webView
         titleObservation = webView.observe(\.title) { [weak self] _, _ in self?.updateTitle() }
         if let server { webView.load(URLRequest(url: server.url)) }
+    }
+
+    /// Finder's right-click › Open With › CHANNEL, and `open -a CHANNEL <file>`:
+    /// hold the files and ask which channel they belong in.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let files = urls.filter { $0.isFileURL }
+        guard !files.isEmpty else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        let pasteboard = NSPasteboard(name: .init("studio.oxoy.arena-archive.open"))
+        pasteboard.clearContents()
+        pasteboard.writeObjects(files.map { $0 as NSURL })
+        menuBar.drop(pasteboard, into: nil)
+    }
+
+    /// Files dropped on the page are filed into the channel under the pointer and
+    /// the originals go to the Trash, so a drop moves them into the archive.
+    func fileDroppedInPage(_ urls: [URL], at point: NSPoint) -> Bool {
+        guard let server, !readOnly else { return false }
+        let zoom = webView.pageZoom
+        let x = point.x / zoom
+        let y = (webView.bounds.height - point.y) / zoom
+        webView.evaluateJavaScript("window.channelAt ? window.channelAt(\(x), \(y)) : ''") { [weak self] value, _ in
+            guard let self, let channel = Int(String(describing: value ?? "")) else { return }
+            self.file(urls, into: channel, base: server.url)
+        }
+        return true
+    }
+
+    func file(_ urls: [URL], into channel: Int, base: URL) {
+        let client = ArchiveClient(base: base)
+        Task { @MainActor in
+            var firstError: Error?
+            for url in urls {
+                do {
+                    try await client.add(.file(url, source: nil, temporary: false), to: channel)
+                    NSWorkspace.shared.recycle([url], completionHandler: nil)
+                } catch {
+                    firstError = firstError ?? error
+                }
+            }
+            webView.reload()
+            if let firstError {
+                let alert = NSAlert()
+                alert.messageText = "Some files were not added"
+                alert.informativeText = firstError.localizedDescription
+                alert.beginSheetModal(for: window, completionHandler: nil)
+            }
+        }
     }
 
     func updateTitle() {
@@ -860,5 +909,37 @@ enum Main {
         app.delegate = delegate
         app.setActivationPolicy(.regular)
         app.run()
+    }
+}
+
+// MARK: - Web view
+
+/// A web view that takes file drops itself, so the app knows where the files came
+/// from and can move the originals instead of only copying their contents.
+final class ArchiveWebView: WKWebView {
+    var onFiles: (([URL], NSPoint) -> Bool)?
+
+    private func droppedFiles(_ sender: NSDraggingInfo) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL] ?? []
+        return urls.filter { url in
+            var isFolder: ObjCBool = false
+            return fm.fileExists(atPath: url.path, isDirectory: &isFolder) && !isFolder.boolValue
+        }
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedFiles(sender).isEmpty ? super.draggingEntered(sender) : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedFiles(sender).isEmpty ? super.draggingUpdated(sender) : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = droppedFiles(sender)
+        guard !urls.isEmpty else { return super.performDragOperation(sender) }
+        let point = convert(sender.draggingLocation, from: nil)
+        return onFiles?(urls, point) ?? super.performDragOperation(sender)
     }
 }

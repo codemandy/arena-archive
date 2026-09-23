@@ -47,6 +47,7 @@ def layout(title: str, body: str) -> str:
 <div class='modal-zoom' aria-label='Image zoom'><button type='button' data-zoom='out'>−</button><button type='button' data-zoom='reset'>100%</button><button type='button' data-zoom='in'>+</button></div>
 <div id='modal-content'></div></section></div>
 <script>
+const readOnly = {'true' if READ_ONLY else 'false'};
 const modal = document.getElementById('post-modal');
 const modalContent = document.getElementById('modal-content');
 let modalScale = 1;
@@ -102,7 +103,7 @@ document.addEventListener('click', (event) => {{
   if (modalScale <= 1) {{ modalPanX = 0; modalPanY = 0; }}
   applyZoom();
 }});
-const closeModal = () => {{ modal.hidden = true; modalContent.replaceChildren(); document.body.classList.remove('modal-open'); }};
+const closeModal = () => {{ modalContent.querySelector(':focus')?.blur(); modal.hidden = true; modalContent.replaceChildren(); document.body.classList.remove('modal-open'); }};
 document.addEventListener('click', (event) => {{
   const close = event.target.closest('[data-close-modal]');
   if (close) {{ closeModal(); return; }}
@@ -117,6 +118,9 @@ let currentBlock = null;
 const openBlock = (block) => {{
   currentBlock = block;
   const clone = block.cloneNode(true);
+  // A draggable clone would start a drag instead of letting you select text in the fields.
+  clone.removeAttribute('draggable');
+  clone.removeAttribute('data-draggable-block');
   const sourceTypes = ['image', 'link', 'text', 'embed'];
   const visual = clone.querySelector('.block-visual');
   if (clone.dataset.source && visual && sourceTypes.includes(clone.dataset.type)) {{
@@ -128,6 +132,15 @@ const openBlock = (block) => {{
     while (visual.firstChild) source.append(visual.firstChild);
     visual.append(source);
   }}
+  if (block.dataset.download) {{
+    const download = document.createElement('a');
+    download.className = 'modal-download';
+    download.href = block.dataset.download;
+    download.download = '';
+    download.textContent = 'DOWNLOAD ↓';
+    clone.querySelector('.block-visual').append(download);
+  }}
+  clone.append(titleEditor(block, clone), linkEditor(block), noteEditor(block, clone));
   showClone(clone);
   // The grid thumbnail shows instantly; the full image replaces it once decoded.
   const image = clone.querySelector('img[data-full]');
@@ -142,6 +155,77 @@ const openBlock = (block) => {{
     if (next) loadFull(next.dataset.full);
   }}
 }};
+// The name and note are edited in the modal and saved as you type.
+const saveField = (path, block, body) => fetch(path, {{ method: 'POST', headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }}, body: new URLSearchParams({{ block_id: block.dataset.blockId, ...body }}) }});
+const autosave = (field, save) => {{
+  let pending = null;
+  field.addEventListener('input', () => {{ clearTimeout(pending); pending = setTimeout(save, 600); }});
+  field.addEventListener('blur', () => {{ clearTimeout(pending); save(); }});
+  field.addEventListener('keydown', (event) => event.stopPropagation());
+}};
+const titleEditor = (block, clone) => {{
+  const stored = block.querySelector('h3');
+  clone.querySelector('h3')?.remove();
+  const editor = document.createElement('input');
+  editor.className = 'modal-title';
+  editor.type = 'text';
+  editor.placeholder = readOnly ? 'Names are read-only' : 'Untitled';
+  editor.setAttribute('aria-label', 'Name');
+  editor.value = stored ? stored.textContent : '';
+  editor.readOnly = readOnly;
+  if (!readOnly) autosave(editor, () => {{
+    const title = editor.value.trim();
+    if (stored) stored.textContent = title;
+    saveField('/set-title', block, {{ title }});
+  }});
+  return editor;
+}};
+const linkEditor = (block) => {{
+  const editor = document.createElement('input');
+  editor.className = 'modal-link';
+  editor.type = 'url';
+  editor.placeholder = readOnly ? 'Links are read-only' : 'Add a link';
+  editor.setAttribute('aria-label', 'Link');
+  editor.value = block.dataset.source || '';
+  editor.readOnly = readOnly;
+  if (!readOnly) autosave(editor, async () => {{
+    const response = await saveField('/set-source', block, {{ source_url: editor.value.trim() }});
+    if (!response.ok) return;
+    const {{ source_url: link }} = await response.json();
+    if (document.activeElement !== editor) editor.value = link;
+    if (link) block.dataset.source = link; else delete block.dataset.source;
+    const meta = block.querySelector('.block-meta');
+    let anchor = meta && meta.querySelector('a');
+    if (link && meta && !anchor) {{
+      anchor = document.createElement('a');
+      anchor.target = '_blank';
+      anchor.rel = 'noreferrer';
+      anchor.textContent = 'SOURCE ↗';
+      meta.append(anchor);
+    }}
+    if (anchor) {{ if (link) anchor.href = link; else anchor.remove(); }}
+  }});
+  return editor;
+}};
+// Each block carries a note, edited in the modal and saved as you type.
+const noteEditor = (block, clone) => {{
+  const stored = block.querySelector('.block-note');
+  clone.querySelector('.block-note')?.remove();
+  const editor = document.createElement('textarea');
+  editor.className = 'modal-note';
+  editor.rows = 2;
+  editor.placeholder = readOnly ? 'Notes are read-only' : 'Add a note';
+  editor.setAttribute('aria-label', 'Note');
+  editor.value = stored ? stored.textContent : '';
+  editor.readOnly = readOnly;
+  if (readOnly) return editor;
+  autosave(editor, () => {{
+    const note = editor.value.trim();
+    if (stored) {{ stored.textContent = note; stored.hidden = !note; }}
+    saveField('/set-note', block, {{ note }});
+  }});
+  return editor;
+}};
 const fullImages = new Map();
 const loadFull = (url) => {{
   if (!fullImages.has(url)) {{
@@ -153,6 +237,12 @@ const loadFull = (url) => {{
     if (fullImages.size > 12) fullImages.delete(fullImages.keys().next().value);
   }}
   return fullImages.get(url);
+}};
+// The Mac app asks which channel sits under a dropped file.
+window.channelAt = (x, y) => {{
+  const element = document.elementFromPoint(x, y);
+  const target = (element && element.closest('[data-drop-channel]')) || pageChannel;
+  return target ? target.dataset.dropChannel : '';
 }};
 const visibleBlocks = () => [...document.querySelectorAll('main .block')].filter((block) => block.offsetParent !== null);
 const showClone = (clone) => {{
@@ -279,9 +369,9 @@ if (liveSearch) {{
 def db():
     connection = sqlite3.connect(DATABASE)
     connection.row_factory = sqlite3.Row
-    for column in ("category TEXT NOT NULL DEFAULT ''", "favorite INTEGER NOT NULL DEFAULT 0"):
+    for table, column in (("channels", "category TEXT NOT NULL DEFAULT ''"), ("channels", "favorite INTEGER NOT NULL DEFAULT 0"), ("blocks", "note TEXT NOT NULL DEFAULT ''")):
         try:
-            connection.execute(f"ALTER TABLE channels ADD COLUMN {column}")
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
         except sqlite3.OperationalError:
             pass
     connection.execute("CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY)")
@@ -304,7 +394,7 @@ def cleanup_block(connection: sqlite3.Connection, block_id: int) -> None:
         if relative.parts and relative.parts[0] == "assets":
             relative = Path(*relative.parts[1:])
         (ASSETS / relative).unlink(missing_ok=True)
-        for suffix in (".jpg", ".png"):
+        for suffix in (".jpg", ".png", ".ql.png"):
             (THUMBS / (relative.name + suffix)).unlink(missing_ok=True)
         connection.execute("DELETE FROM assets WHERE block_id = ?", (block_id,))
     connection.execute("DELETE FROM blocks WHERE id = ?", (block_id,))
@@ -312,6 +402,25 @@ def cleanup_block(connection: sqlite3.Connection, block_id: int) -> None:
 
 def form_value(values: dict[str, list[str]], key: str) -> str:
     return values.get(key, [""])[0].strip()
+
+
+def preview(source: Path) -> Path | None:
+    """A Quick Look picture of a PDF, document or video, drawn once and kept."""
+    target = THUMBS / (source.name + ".ql.png")
+    if target.exists():
+        return target
+    THUMBS.mkdir(parents=True, exist_ok=True)
+    scratch = THUMBS / f".ql-{threading.get_ident()}"
+    scratch.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["qlmanage", "-t", "-s", str(THUMB_EDGE), "-o", str(scratch), str(source)], capture_output=True)
+    drawn = next(iter(sorted(scratch.glob("*.png"))), None) if scratch.exists() else None
+    if drawn:
+        drawn.replace(target)
+    if scratch.exists():
+        for leftover in scratch.iterdir():
+            leftover.unlink(missing_ok=True)
+        scratch.rmdir()
+    return target if target.exists() else None
 
 
 def thumbnail(source: Path, content_type: str) -> Path:
@@ -340,7 +449,11 @@ def block_card(row: sqlite3.Row) -> str:
         thumb = "/thumbs/" + asset.removeprefix("assets/")
         visual = f"<img src='{esc(thumb)}' data-full='/{esc(asset)}' alt='{esc(row['title'] or row['author_name'] or kind)}' loading='lazy' decoding='async'>"
     elif asset:
-        visual = f"<a class='download-block' href='/{esc(asset)}' download>DOWNLOAD {kind}<br><strong>{esc(row['title'] or 'Attached file')}</strong></a>"
+        # A div, not a link: attachments open the modal like every other block, and
+        # the modal carries the download.
+        preview_src = "/thumbs/" + asset.removeprefix("assets/")
+        picture = f"<img class='block-preview' src='{esc(preview_src)}' alt='' loading='lazy' decoding='async' onerror='this.remove()'>"
+        visual = f"<div class='download-block'>{picture}{kind}<br><strong>{esc(row['title'] or 'Attached file')}</strong></div>"
     elif row["type"] == "channel":
         visual = f"<a class='channel-block' href='{esc(row['source_url'])}'><span>CHANNEL</span><strong>{title_markup(row['title'] or 'Untitled channel')}</strong></a>"
     elif row["type"] == "text":
@@ -348,13 +461,16 @@ def block_card(row: sqlite3.Row) -> str:
     else:
         visual = f"<div class='empty-block'><span>{kind}</span><strong>{title_markup(row['title'] or row['source_url'] or 'Untitled block')}</strong></div>"
     source = f"<a href='{esc(row['source_url'])}' target='_blank' rel='noreferrer'>SOURCE ↗</a>" if row["source_url"] and row["type"] != "channel" else ""
+    download = f" data-download='/{esc(asset)}'" if asset and row["type"] != "image" else ""
     source_attribute = f" data-source='{source_value}'" if source_value else ""
+    note = row["note"] if "note" in row.keys() else ""
+    note_markup = f"<p class='block-note'{'' if note else ' hidden'}>{esc(note)}</p>"
     remove = ""
     draggable = ""
     if "parent_channel_id" in row.keys():
         remove = f"<form class='block-remove' method='post' action='/remove-block'><input type='hidden' name='channel_id' value='{row['parent_channel_id']}'><input type='hidden' name='block_id' value='{row['id']}'><button type='submit'>REMOVE</button></form>"
-        draggable = f" draggable='true' data-draggable-block data-block-id='{row['id']}'"
-    return f"<article class='block' data-type='{esc(row['type'])}'{source_attribute}{draggable}><div class='block-visual'>{visual}{remove}</div><div class='block-meta'><span>{kind}</span><span>{esc(row['author_name'])}</span>{source}</div><h3>{title_markup(row['title'])}</h3></article>"
+        draggable = " draggable='true' data-draggable-block"
+    return f"<article class='block' data-type='{esc(row['type'])}' data-block-id='{row['id']}'{source_attribute}{download}{draggable}><div class='block-visual'>{visual}{remove}</div><div class='block-meta'><span>{kind}</span><span>{esc(row['author_name'])}</span>{source}</div><h3>{title_markup(row['title'])}</h3>{note_markup}</article>"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -388,8 +504,15 @@ class Handler(BaseHTTPRequestHandler):
                 asset = connection.execute("SELECT content_type FROM assets WHERE path = ?", (str(Path("assets") / relative),)).fetchone()
                 connection.close()
                 content_type = asset["content_type"] if asset else "application/octet-stream"
-                if path.startswith("/thumbs/") and content_type.startswith("image/"):
-                    target = thumbnail(target, content_type)
+                if path.startswith("/thumbs/"):
+                    if content_type.startswith("image/"):
+                        target = thumbnail(target, content_type)
+                    else:
+                        drawn = preview(target)
+                        if drawn is None:
+                            self.send_error(404)
+                            return
+                        target = drawn
                     if target.parent == THUMBS:
                         content_type = "image/png" if target.suffix == ".png" else "image/jpeg"
                 data = target.read_bytes()
@@ -451,6 +574,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.connect_channel(values)
             elif self.path == "/delete-channel":
                 self.delete_channel(values)
+            elif self.path == "/set-title":
+                self.set_title(values)
+            elif self.path == "/set-source":
+                self.set_source(values)
+            elif self.path == "/set-note":
+                self.set_note(values)
             elif self.path == "/toggle-favorite":
                 self.toggle_favorite(values)
             else:
@@ -527,7 +656,7 @@ class Handler(BaseHTTPRequestHandler):
         position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         raw = json.dumps({"local": True, "created_at": now})
-        connection.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, kind, title, content, "", "Local archive", "local", source, now, now, raw))
+        connection.execute("INSERT INTO blocks (id, type, title, content, description, author_name, author_slug, source_url, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, kind, title, content, "", "Local archive", "local", source, now, now, raw))
         connection.execute("INSERT INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, raw))
         connection.commit()
         connection.close()
@@ -542,6 +671,48 @@ class Handler(BaseHTTPRequestHandler):
         connection.commit()
         connection.close()
         self.redirect(f"/channel/{channel_id}")
+
+    def set_title(self, values: dict[str, list[str]]) -> None:
+        block_id = int(form_value(values, "block_id"))
+        title = form_value(values, "title")[:300]
+        connection = db()
+        if not connection.execute("SELECT 1 FROM blocks WHERE id = ?", (block_id,)).fetchone():
+            raise ValueError("block not found")
+        connection.execute("UPDATE blocks SET title = ? WHERE id = ?", (title, block_id))
+        connection.commit()
+        connection.close()
+        self.send_response(204)
+        self.end_headers()
+
+    def set_source(self, values: dict[str, list[str]]) -> None:
+        block_id = int(form_value(values, "block_id"))
+        link = form_value(values, "source_url")[:2000]
+        if link and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", link):
+            link = "https://" + link
+        connection = db()
+        if not connection.execute("SELECT 1 FROM blocks WHERE id = ?", (block_id,)).fetchone():
+            raise ValueError("block not found")
+        connection.execute("UPDATE blocks SET source_url = ? WHERE id = ?", (link, block_id))
+        connection.commit()
+        connection.close()
+        data = json.dumps({"source_url": link}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def set_note(self, values: dict[str, list[str]]) -> None:
+        block_id = int(form_value(values, "block_id"))
+        note = values.get("note", [""])[0].strip()[:2000]
+        connection = db()
+        if not connection.execute("SELECT 1 FROM blocks WHERE id = ?", (block_id,)).fetchone():
+            raise ValueError("block not found")
+        connection.execute("UPDATE blocks SET note = ? WHERE id = ?", (note, block_id))
+        connection.commit()
+        connection.close()
+        self.send_response(204)
+        self.end_headers()
 
     def connect_block(self, values: dict[str, list[str]]) -> None:
         channel_id = int(form_value(values, "channel_id"))
@@ -575,7 +746,7 @@ class Handler(BaseHTTPRequestHandler):
             block_id = existing["id"]
         else:
             block_id = local_id(connection, "blocks")
-            connection.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "channel", source["title"] or source["slug"], "", "", "Local archive", "local", f"/channel/{source_id}", now, now, json.dumps({"local": True, "channel_id": source_id})))
+            connection.execute("INSERT INTO blocks (id, type, title, content, description, author_name, author_slug, source_url, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "channel", source["title"] or source["slug"], "", "", "Local archive", "local", f"/channel/{source_id}", now, now, json.dumps({"local": True, "channel_id": source_id})))
         position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
         connection.execute("INSERT OR IGNORE INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, json.dumps({"local": True, "connected_at": now})))
         connection.commit()
@@ -619,7 +790,7 @@ class Handler(BaseHTTPRequestHandler):
         title = Path(upload_name or "Untitled image").name
         raw = json.dumps({"local": True, "filename": title, "created_at": now})
         position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
-        connection.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "image" if is_image else "attachment", title, "", "", "Local archive", "local", source, now, now, raw))
+        connection.execute("INSERT INTO blocks (id, type, title, content, description, author_name, author_slug, source_url, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "image" if is_image else "attachment", title, "", "", "Local archive", "local", source, now, now, raw))
         connection.execute("INSERT INTO assets VALUES (?, ?, ?, ?, ?, ?)", (block_id, str(Path("assets") / "channels" / str(channel_id) / filename), "", image_type, len(data), "available"))
         connection.execute("INSERT INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, raw))
         connection.commit()

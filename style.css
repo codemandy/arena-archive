@@ -45,3 +45,22 @@ main { max-width: 1440px; margin: auto; padding: 0 28px 80px; }.hero { padding: 
 .view-line > .channel-count { margin-left: auto; text-transform: uppercase; }
 .channel-count + .search-form { margin-left: 0; }
 body.page-drop::after { content: 'DROP TO ADD TO THIS CHANNEL'; position: fixed; inset: 12px; z-index: 50; display: grid; place-items: center; border: 2px dashed var(--ink); background: rgba(230,255,63,.35); font: 700 12px Arial, Helvetica, sans-serif; letter-spacing: .13em; pointer-events: none; }
+.block-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+.block-note[hidden] { display: none; }
+.modal-note { display: block; width: 100%; margin-top: 18px; padding: 10px 12px; border: 1px solid var(--line); background: transparent; color: var(--ink); font: 13px/1.5 Arial, Helvetica, sans-serif; resize: vertical; }
+.modal-note:focus { outline: 2px solid var(--ink); outline-offset: -2px; }
+.modal-title { display: block; width: 100%; margin-top: 22px; padding: 8px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font: 700 22px Arial, Helvetica, sans-serif; letter-spacing: -.02em; }
+.modal-title:focus { outline: 0; border-bottom-color: var(--ink); }
+.modal-note { margin-top: 12px; }
+.modal-link { display: block; width: 100%; margin-top: 10px; padding: 8px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--muted); font: 12px monospace; letter-spacing: .02em; }
+.modal-link:focus { outline: 0; border-bottom-color: var(--ink); color: var(--ink); }
+.modal-download { display: inline-block; margin-top: 14px; padding: 8px 14px; border: 1px solid var(--ink); font: 10px monospace; letter-spacing: .12em; }
+.modal-download:hover { background: var(--ink); color: var(--paper); }
+.download-block { position: relative; overflow: hidden; }
+.block-preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.download-block strong, .modal-panel .download-block { position: relative; }
+.block-preview ~ strong { position: relative; margin-top: 58px; padding: 6px 8px; background: var(--paper); box-decoration-break: clone; }
+.modal-panel .download-block { min-height: 420px; }
+.modal-panel .block-preview { object-fit: contain; object-position: center; }
+/* In the modal the name is already an editable field below the preview. */
+.modal-panel .block-preview ~ strong { display: none; }
