@@ -64,3 +64,40 @@ body.page-drop::after { content: 'DROP TO ADD TO THIS CHANNEL'; position: fixed;
 .modal-panel .block-preview { object-fit: contain; object-position: center; }
 /* In the modal the name is already an editable field below the preview. */
 .modal-panel .block-preview ~ strong { display: none; }
+
+/* Drop tray: the web version of the Mac app's menu bar tray */
+.tray-toggle { border: 1px solid var(--ink); background: transparent; color: var(--ink); padding: 8px 10px; font: 10px monospace; letter-spacing: .1em; cursor: pointer; }
+.tray-toggle:hover, .tray-toggle[aria-expanded='true'], .tray-toggle.drop-ready, .external-drag .tray-toggle { background: var(--accent); }
+.tray-toggle span { margin-left: 6px; padding: 1px 5px; background: var(--ink); color: var(--paper); }
+.tray-toggle span[hidden] { display: none; }
+.tray { position: fixed; top: 72px; right: 28px; z-index: 15; width: 340px; max-width: calc(100vw - 32px); max-height: min(560px, calc(100vh - 88px)); display: flex; flex-direction: column; gap: 10px; padding: 14px; background: var(--paper); border: 1px solid var(--ink); }
+.tray[hidden] { display: none; }
+.tray-head { display: flex; align-items: center; justify-content: space-between; }
+.tray-head .eyebrow { margin: 0; }
+.tray-close { border: 0; background: transparent; padding: 0; font: 10px monospace; letter-spacing: .08em; cursor: pointer; }
+.tray-close:hover { color: var(--muted); }
+.tray-held { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border: 1px dashed var(--line); }
+.tray.hold-ready .tray-held { border-color: var(--ink); background: var(--accent); }
+.tray-held p { flex: 1; min-width: 0; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.tray.hold-ready .tray-held p { color: var(--ink); }
+.tray-held button, .tray-foot button { flex: none; border: 1px solid var(--ink); background: transparent; padding: 6px 8px; font: 9px monospace; letter-spacing: .08em; cursor: pointer; }
+.tray-held button:hover, .tray-foot button:hover { background: var(--accent); }
+.tray-held button[hidden] { display: none; }
+#tray-search { width: 100%; border: 1px solid var(--line); background: transparent; padding: 9px 10px; font: 12px Arial, Helvetica, sans-serif; }
+.tray-list { flex: 1; min-height: 120px; overflow: auto; }
+.tray-section { margin: 14px 0 4px; color: var(--muted); font: 700 10px Arial, Helvetica, sans-serif; letter-spacing: .13em; text-transform: uppercase; }
+.tray-section:first-child { margin-top: 0; }
+.tray-row { display: block; width: 100%; padding: 7px 8px; border: 0; background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.tray-row strong { display: block; overflow: hidden; font-size: 13px; letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
+.tray-row span { display: block; overflow: hidden; margin-top: 2px; color: var(--muted); font: 9px monospace; letter-spacing: .06em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.tray-row:hover, .tray-row:focus-visible { background: rgba(17,17,17,.06); outline: 0; }
+.tray-row.drop-ready { background: var(--accent); }
+.tray-row.drop-ready span { color: var(--ink); }
+.tray-note { margin: 4px 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.tray-foot { display: flex; gap: 10px; align-items: center; }
+.tray-foot p { flex: 1; min-width: 0; margin: 0; color: var(--muted); font: 10px/1.4 monospace; overflow-wrap: anywhere; }
+.tray-option { display: flex; gap: 6px; align-items: center; color: var(--muted); font: 9px monospace; letter-spacing: .06em; cursor: pointer; }
+.tray-option[hidden] { display: none; }
+.toast { position: fixed; left: 50%; bottom: 24px; z-index: 30; max-width: calc(100vw - 32px); margin: 0; padding: 10px 14px; transform: translateX(-50%); background: var(--ink); color: var(--paper); font: 11px/1.4 monospace; letter-spacing: .04em; }
+.toast[hidden] { display: none; }
+@media (max-width: 600px) { .tray { top: 64px; right: 16px; } .main-nav { margin-right: 12px; } }

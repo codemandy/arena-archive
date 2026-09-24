@@ -11,6 +11,23 @@ python3 server.py
 
 Then open <http://127.0.0.1:8765>.
 
+### Adding to channels in the browser
+
+Drop files, images, links or text onto a channel card, or anywhere on a
+channel page, to add them to that channel. Images become image blocks. Other
+files become attachment blocks. Links and text become link and text blocks.
+
+The TRAY button in the top bar works like the Mac app's menu bar tray. Drag
+something over it and a channel list opens:
+
+- Drop onto a channel to file it there.
+- Drop onto the tray itself to hold it, then click a channel (or search and
+  press Return) to file everything that's held. ADD FILES… holds files picked
+  from a file dialog, which also works on touch screens.
+
+Recent channels and favorites are listed first. Blocks and channel cards
+dragged from the page onto a channel in the tray are added there too.
+
 ## Mac app
 
 `mac/build.sh` builds a native app with the free Command Line Tools
@@ -75,9 +92,12 @@ The importer stores `archive.db` and downloaded files under `assets/`. Set
 `ARENA_TOKEN` enables importing channels visible to that account, including
 private channels. Keep the resulting archive local.
 
-Images dropped into a channel are stored under
-`assets/channels/<channel-id>/`. Browsers provide a copy of a local file to a
-web app, so the original file on your computer is not moved or deleted.
+Files dropped into a channel are stored under
+`assets/channels/<channel-id>/`. Browsers give a web page a copy of a local
+file, so the original normally stays where it is. In Chrome and Edge, a drop on
+a channel card or page asks whether to delete the original once it's filed, as
+the Mac app moves it to the Trash. The tray does this only when "Delete
+originals after filing" is on. Files the browser deletes skip the Trash.
 
 The API importer spaces requests and retries HTTP 429 responses using
 Are.na's `Retry-After` value. With a personal read token, it uses the V3

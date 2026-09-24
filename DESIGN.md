@@ -81,6 +81,22 @@ Clicking a block opens a modal with the complete local block content. The modal
 closes through the close control, backdrop, or `Escape`. Source links inside the
 modal open in a new tab.
 
+### Drop Tray
+
+The `TRAY` button sits at the right of the top bar and opens a narrow panel
+under it: held items, a channel search, and channel rows grouped as Recent,
+Favorites and All channels. Rows show the title with a monospace
+category/count line. The accent marks the row or hold area under a drag, and
+the button while anything is dragged into the window. A count chip on the
+button shows held items. The Mac app leaves the tray out, since its menu bar
+tray does the same job.
+
+### Status Toast
+
+Results of drops ("Added 2 items to Reading list.") appear in a small ink
+toast at the bottom center for a few seconds, and carry across the reload that
+shows the new blocks.
+
 ### Editing
 
 Local editing is grouped in one `EDITING` area. It supports creating channels,

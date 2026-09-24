@@ -26,6 +26,9 @@ THUMBS = ASSETS.parent / "thumbs"
 THUMB_EDGE = 800
 THUMB_MIN_BYTES = 250_000
 READ_ONLY = os.getenv("ARENA_READONLY") == "1"
+# The Mac app starts the server with ARENA_PARENT_PID and files drops through its
+# own menu bar tray, so the page leaves its tray out there.
+NATIVE_APP = bool(os.getenv("ARENA_PARENT_PID"))
 
 
 def esc(value: object) -> str:
@@ -36,11 +39,444 @@ def title_markup(value: object) -> str:
     return esc(value).replace("_", "_<wbr>")
 
 
+TRAY_TOGGLE = "<button class='tray-toggle' id='tray-toggle' type='button' aria-expanded='false' aria-controls='tray' title='Drop files, links or text here'>TRAY ↓<span id='tray-count' hidden></span></button>"
+
+TRAY_PANEL = """<section class='tray' id='tray' hidden aria-label='Drop tray'>
+<div class='tray-head'><p class='eyebrow'>FILE INTO A CHANNEL</p><button type='button' class='tray-close' id='tray-close'>CLOSE ×</button></div>
+<div class='tray-held'><p id='tray-label'></p><button type='button' id='tray-clear' hidden>CLEAR</button></div>
+<input id='tray-search' type='search' placeholder='Find a channel' autocomplete='off' aria-label='Find a channel'>
+<div class='tray-list' id='tray-list'></div>
+<div class='tray-foot'><p id='tray-status' role='status' aria-live='polite'></p><button type='button' id='tray-choose'>ADD FILES…</button><input id='tray-files' type='file' multiple hidden></div>
+<label class='tray-option' hidden title="Off: the archive keeps a copy and your original stays put. On: the browser asks to delete each original once it's filed. Deleted files skip the Trash."><input type='checkbox' id='tray-remove'> DELETE ORIGINALS AFTER FILING</label>
+</section>"""
+
+# Drag and drop, and the drop tray. Plain JavaScript, kept out of the layout f-string.
+DROP_SCRIPT = r"""// Files, links and text from outside the page become blocks in the channel they
+// are dropped on (on a channel page, anywhere outside another target). Block and
+// channel cards dragged within the page are connected instead.
+const pageChannel = document.querySelector('.block-grid[data-drop-channel]');
+const elementOf = (event) => event.target instanceof Element ? event.target : event.target.parentElement;
+let pageDrag = false;
+document.addEventListener('dragstart', (event) => {
+  pageDrag = true;
+  const origin = elementOf(event);
+  const channel = origin && origin.closest('[data-draggable-channel]');
+  if (channel) {
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('application/x-archive-channel', channel.dataset.draggableChannel);
+    document.body.classList.add('dragging');
+    return;
+  }
+  const block = origin && origin.closest('[data-draggable-block]');
+  if (!block) return;
+  event.dataTransfer.effectAllowed = 'copy';
+  event.dataTransfer.setData('application/x-archive-block', block.dataset.blockId);
+  document.body.classList.add('dragging');
+});
+document.addEventListener('dragend', () => { pageDrag = false; document.body.classList.remove('dragging'); });
+const isArchiveDrag = (transfer) => ['application/x-archive-block', 'application/x-archive-channel'].some((type) => transfer.types.includes(type));
+// Dragging a picture or selected text within the page is not something to file.
+const isExternal = (transfer) => !pageDrag && ['Files', 'text/uri-list', 'text/plain'].some((type) => transfer.types.includes(type));
+
+// Reads a drop, most specific first: files, then a link, then plain text. File
+// handles are only available during the drop event, so they're requested now.
+const canRemoveOriginals = window.isSecureContext && typeof DataTransferItem !== 'undefined' && 'getAsFileSystemHandle' in DataTransferItem.prototype;
+const isWebLink = (value) => /^https?:\/\/\S+$/i.test(value || '');
+const hostOf = (url) => { try { return new URL(url).host || url; } catch (error) { return url; } };
+const readDrop = (transfer) => {
+  const files = [];
+  for (const entry of transfer.items) {
+    if (entry.kind !== 'file') continue;
+    const file = entry.getAsFile();
+    if (!file) continue;
+    const folder = Boolean(entry.webkitGetAsEntry && entry.webkitGetAsEntry()?.isDirectory);
+    const handle = canRemoveOriginals ? entry.getAsFileSystemHandle().catch(() => null) : null;
+    files.push({ kind: 'file', file, folder, handle, label: file.name });
+  }
+  if (files.length) return files;
+  const [mozUrl, mozTitle] = (transfer.getData('text/x-moz-url') || '').split(/\r?\n/);
+  const uri = mozUrl || (transfer.getData('text/uri-list') || '').split(/\r?\n/).map((line) => line.trim()).find((line) => line && !line.startsWith('#'));
+  if (isWebLink(uri)) return [{ kind: 'link', url: uri, title: mozTitle || '', label: mozTitle || hostOf(uri) }];
+  const text = (transfer.getData('text/plain') || '').trim();
+  if (!text) return [];
+  if (isWebLink(text)) return [{ kind: 'link', url: text, title: '', label: hostOf(text) }];
+  return [{ kind: 'text', text, label: `“${text.slice(0, 40)}”` }];
+};
+const fileItem = (file) => ({ kind: 'file', file, folder: false, handle: null, label: file.name });
+
+// Filing goes through the same endpoints as the rest of the page.
+const postForm = (path, fields) => fetch(path, { method: 'POST', body: new URLSearchParams(fields), redirect: 'manual' });
+const succeeded = (response) => response.ok || response.type === 'opaqueredirect';
+// The server answers errors with an HTML notice; pull out its message.
+const failure = async (response) => {
+  if (response.status === 403) return 'The archive is read-only right now.';
+  const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+  const paragraph = page.querySelector('.notice p');
+  return paragraph ? paragraph.textContent : `The archive answered with error ${response.status}.`;
+};
+const addItem = async (item, channelId) => {
+  let response;
+  if (item.kind === 'file') {
+    if (item.folder) throw new Error(`${item.file.name} is a folder. Drop the files inside it instead.`);
+    const form = new FormData();
+    form.append('channel_id', channelId);
+    form.append('file', item.file, item.file.name);
+    response = await fetch('/upload-file', { method: 'POST', body: form });
+  } else if (item.kind === 'link') {
+    response = await postForm('/create-block', { channel_id: channelId, type: 'link', title: item.title || hostOf(item.url), content: '', source_url: item.url });
+  } else {
+    const firstLine = item.text.split(/\r?\n/)[0];
+    response = await postForm('/create-block', { channel_id: channelId, type: 'text', title: firstLine.slice(0, 60), content: item.text });
+  }
+  if (!succeeded(response)) throw new Error(await failure(response));
+};
+// Chromium can delete a dropped file once the browser has asked for permission.
+// Anything else keeps the original, like any browser upload.
+const removeOriginal = async (item) => {
+  const handle = item.handle && await item.handle;
+  if (!handle || !handle.remove) return;
+  try {
+    if (handle.requestPermission && await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') return;
+    await handle.remove();
+  } catch (error) {}
+};
+const channelNames = new Map();
+const channelName = (id) => {
+  if (channelNames.has(Number(id))) return channelNames.get(Number(id));
+  const card = document.querySelector(`[data-drop-channel="${id}"]:not(.block-grid)`);
+  const heading = card ? card.querySelector('h2, strong') : pageChannel && pageChannel.dataset.dropChannel === String(id) ? document.querySelector('.channel-heading h1') : null;
+  return heading ? heading.textContent.trim() : 'the channel';
+};
+const count = (n) => n === 1 ? '1 item' : `${n} items`;
+const recentChannels = () => { try { return JSON.parse(localStorage.getItem('channel.recent') || '[]').filter(Number.isInteger); } catch (error) { return []; } };
+const rememberRecent = (id) => { try { localStorage.setItem('channel.recent', JSON.stringify([id, ...recentChannels().filter((other) => other !== id)].slice(0, 4))); } catch (error) {} };
+const fileItems = async (items, channelId, { removeOriginals, report }) => {
+  const name = channelName(channelId);
+  report(`Adding ${count(items.length)} to ${name}…`);
+  const failed = [];
+  let firstError = null;
+  for (const item of items) {
+    try {
+      await addItem(item, channelId);
+      if (removeOriginals && item.kind === 'file') await removeOriginal(item);
+    } catch (error) {
+      failed.push(item);
+      firstError = firstError || error;
+    }
+  }
+  const added = items.length - failed.length;
+  if (added) rememberRecent(Number(channelId));
+  const message = firstError ? `Added ${added} of ${items.length} to ${name}. ${firstError.message}` : `Added ${count(added)} to ${name}.`;
+  return { added, failed, message };
+};
+
+const toast = document.getElementById('toast');
+let toastTimer = null;
+const notify = (message) => {
+  toast.textContent = message;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 4000);
+};
+// A reload after filing shows the new blocks; the message is carried across it.
+try {
+  const flashed = sessionStorage.getItem('channel.flash');
+  if (flashed) { sessionStorage.removeItem('channel.flash'); notify(flashed); }
+} catch (error) {}
+const showsChannel = (id) => location.pathname === '/' || location.pathname === `/channel/${id}`;
+const changed = (channelId, message) => {
+  if (!showsChannel(channelId)) return notify(message);
+  try { sessionStorage.setItem('channel.flash', message); } catch (error) {}
+  window.location.reload();
+};
+const connectDropped = async (transfer, channelId) => {
+  const channel = transfer.getData('application/x-archive-channel');
+  if (channel) {
+    if (channel === String(channelId)) return;
+    const response = await postForm('/connect-channel', { source_id: channel, channel_id: channelId });
+    return response.ok ? changed(channelId, `Nested the channel in ${channelName(channelId)}.`) : notify('Could not add the channel.');
+  }
+  const blockId = transfer.getData('application/x-archive-block');
+  if (!/^-?\d+$/.test(blockId)) return;
+  const response = await postForm('/connect-block', { block_id: blockId, channel_id: channelId });
+  return response.ok ? changed(channelId, `Added the block to ${channelName(channelId)}.`) : notify('Could not add the block.');
+};
+
+const dropTarget = (event) => {
+  const element = elementOf(event);
+  if (!element || element.closest('input, textarea, select, #post-modal, #tray, #tray-toggle')) return null;
+  return element.closest('[data-drop-channel]') || (isExternal(event.dataTransfer) ? pageChannel : null);
+};
+const endPageDrop = () => { document.body.classList.remove('page-drop', 'external-drag'); if (pageChannel) pageChannel.classList.remove('drop-ready'); };
+document.addEventListener('dragover', (event) => {
+  const transfer = event.dataTransfer;
+  // Never let the browser navigate away to a dropped file.
+  if (transfer.types.includes('Files')) event.preventDefault();
+  const external = isExternal(transfer);
+  document.body.classList.toggle('external-drag', external);
+  const target = dropTarget(event);
+  document.body.classList.toggle('page-drop', Boolean(target) && target === pageChannel && external);
+  if (!target) return;
+  event.preventDefault();
+  if (target !== pageChannel) target.classList.add('drop-ready');
+});
+document.addEventListener('dragleave', (event) => {
+  if (!event.relatedTarget) endPageDrop();
+  const target = elementOf(event)?.closest('[data-drop-channel]');
+  if (target && !target.contains(event.relatedTarget)) target.classList.remove('drop-ready');
+});
+document.addEventListener('drop', async (event) => {
+  const transfer = event.dataTransfer;
+  const target = dropTarget(event);
+  endPageDrop();
+  if (transfer.types.includes('Files')) event.preventDefault();
+  if (!target) return;
+  event.preventDefault();
+  target.classList.remove('drop-ready');
+  const channelId = target.dataset.dropChannel;
+  if (isArchiveDrag(transfer)) return connectDropped(transfer, channelId);
+  if (pageDrag) return;
+  const items = readDrop(transfer);
+  if (!items.length) return notify('Nothing to add from that drop.');
+  // Like the Mac app, a drop on the page moves files into the archive where the browser allows it.
+  const { added, message } = await fileItems(items, channelId, { removeOriginals: true, report: notify });
+  if (added) changed(channelId, message); else notify(message);
+});
+
+// The drop tray: the web version of the Mac app's menu bar tray. Drop onto a
+// channel to file there, or onto the tray to hold items and pick a channel later.
+const tray = document.getElementById('tray');
+if (tray) {
+  const toggle = document.getElementById('tray-toggle');
+  const heldCount = document.getElementById('tray-count');
+  const list = document.getElementById('tray-list');
+  const search = document.getElementById('tray-search');
+  const label = document.getElementById('tray-label');
+  const clear = document.getElementById('tray-clear');
+  const status = document.getElementById('tray-status');
+  const option = document.getElementById('tray-remove');
+  const picker = document.getElementById('tray-files');
+  let channels = [];
+  let placeholder = 'Opening archive…';
+  let held = [];
+  let closeTimer = null;
+  const say = (message) => { status.textContent = message; status.title = message; };
+
+  const note = (text) => {
+    const paragraph = document.createElement('p');
+    paragraph.className = 'tray-note';
+    paragraph.textContent = text;
+    list.append(paragraph);
+  };
+  const section = (title, rows) => {
+    if (!rows.length) return;
+    const heading = document.createElement('p');
+    heading.className = 'tray-section';
+    heading.textContent = title;
+    list.append(heading);
+    for (const channel of rows) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'tray-row';
+      row.dataset.trayChannel = channel.id;
+      const name = document.createElement('strong');
+      name.textContent = channel.title;
+      const meta = document.createElement('span');
+      meta.textContent = `${channel.favorite ? '★ ' : ''}${channel.category || 'Uncategorized'} · ${channel.block_count} ${channel.block_count === 1 ? 'block' : 'blocks'}`;
+      row.append(name, meta);
+      list.append(row);
+    }
+  };
+  const matching = (term) => channels.filter((channel) => `${channel.title} ${channel.category}`.toLowerCase().includes(term));
+  const render = () => {
+    list.replaceChildren();
+    if (placeholder) return note(placeholder);
+    const term = search.value.trim().toLowerCase();
+    if (term) {
+      const matches = matching(term);
+      if (matches.length) section('Matches', matches); else note(`No channels match “${search.value.trim()}”.`);
+    } else {
+      section('Recent', recentChannels().map((id) => channels.find((channel) => channel.id === id)).filter(Boolean));
+      section('Favorites', channels.filter((channel) => channel.favorite));
+      section('All channels', channels);
+      if (!channels.length) note('No channels yet. Create one on the channels page.');
+    }
+    list.scrollTop = 0;
+  };
+  const refresh = async () => {
+    try {
+      const response = await fetch('/api/channels');
+      if (!response.ok) throw new Error(await failure(response));
+      const data = await response.json();
+      channels = data.channels;
+      channels.forEach((channel) => channelNames.set(channel.id, channel.title));
+      placeholder = null;
+      if (data.read_only) say('The archive is read-only right now.');
+    } catch (error) {
+      placeholder = `Could not load channels. ${error.message}`;
+    }
+    render();
+  };
+
+  const updateHeld = () => {
+    heldCount.hidden = !held.length;
+    heldCount.textContent = held.length;
+    clear.hidden = !held.length;
+    label.textContent = held.length
+      ? `${held.length === 1 ? '1 item held' : `${held.length} items held`}. Click a channel to file ${held.length === 1 ? 'it' : 'them'}.\n${held.map((item) => item.label).join(', ')}`
+      : 'Drop onto a channel below to file it there, or here to hold it and pick a channel later.';
+  };
+  const cancelAutoClose = () => { clearTimeout(closeTimer); closeTimer = null; };
+  const openTray = (focus) => {
+    cancelAutoClose();
+    if (tray.hidden) {
+      tray.hidden = false;
+      toggle.setAttribute('aria-expanded', 'true');
+      render();
+      refresh();
+    }
+    if (focus) search.focus();
+  };
+  const closeTray = () => {
+    cancelAutoClose();
+    tray.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    search.value = '';
+    render();
+  };
+  const hold = (items) => {
+    held = held.concat(items);
+    updateHeld();
+    say('');
+    openTray(false);
+  };
+  const afterFiling = (channelId, { added, failed, message }) => {
+    say(message);
+    if (!added) return;
+    refresh();
+    if (failed.length || held.length) return;
+    if (showsChannel(channelId)) return changed(channelId, message);
+    // Close shortly after a successful drop, as the menu bar tray does.
+    closeTimer = setTimeout(closeTray, 1600);
+  };
+  const fileInto = async (items, channelId) => {
+    afterFiling(channelId, await fileItems(items, channelId, { removeOriginals: option.checked, report: say }));
+  };
+  // Clicking a channel files whatever is held, or opens the channel.
+  const pick = async (channelId) => {
+    if (!held.length) { window.location.assign(`/channel/${channelId}`); return; }
+    const items = held;
+    held = [];
+    updateHeld();
+    const result = await fileItems(items, channelId, { removeOriginals: option.checked, report: say });
+    // Anything that failed stays held so you can try another channel.
+    held = result.failed.concat(held);
+    updateHeld();
+    afterFiling(channelId, result);
+  };
+
+  toggle.addEventListener('click', () => { if (tray.hidden) openTray(true); else closeTray(); });
+  document.getElementById('tray-close').addEventListener('click', closeTray);
+  clear.addEventListener('click', () => { held = []; updateHeld(); say(''); });
+  list.addEventListener('click', (event) => {
+    const row = event.target.closest('[data-tray-channel]');
+    if (row) pick(Number(row.dataset.trayChannel));
+  });
+  search.addEventListener('input', render);
+  // Return files into (or opens) the first match.
+  search.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    const term = search.value.trim().toLowerCase();
+    const first = term && matching(term)[0];
+    if (first) pick(first.id);
+  });
+  document.getElementById('tray-choose').addEventListener('click', () => picker.click());
+  picker.addEventListener('change', () => {
+    if (picker.files.length) hold([...picker.files].map(fileItem));
+    picker.value = '';
+  });
+  if (canRemoveOriginals) {
+    option.closest('label').hidden = false;
+    try { option.checked = localStorage.getItem('channel.removeOriginals') === '1'; } catch (error) {}
+    option.addEventListener('change', () => { try { localStorage.setItem('channel.removeOriginals', option.checked ? '1' : '0'); } catch (error) {} });
+  }
+  document.addEventListener('pointerdown', (event) => {
+    if (!tray.hidden && !tray.contains(event.target) && !toggle.contains(event.target)) closeTray();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !tray.hidden && modal.hidden) closeTray();
+  });
+  window.addEventListener('beforeunload', (event) => {
+    if (!held.length) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
+
+  // Dragging over the toggle opens the tray; dropping on it holds the items.
+  const clearMarks = () => {
+    tray.classList.remove('hold-ready');
+    toggle.classList.remove('drop-ready');
+    list.querySelectorAll('.drop-ready').forEach((row) => row.classList.remove('drop-ready'));
+  };
+  const holdDrop = (event) => {
+    if (pageDrag) return;
+    const items = readDrop(event.dataTransfer);
+    if (items.length) hold(items); else say('Nothing to add from that drop.');
+  };
+  toggle.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggle.classList.add('drop-ready');
+    openTray(false);
+  });
+  toggle.addEventListener('dragleave', () => toggle.classList.remove('drop-ready'));
+  toggle.addEventListener('drop', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    endPageDrop();
+    clearMarks();
+    holdDrop(event);
+  });
+  tray.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    document.body.classList.remove('page-drop');
+    cancelAutoClose();
+    // You can't scroll while dragging, so hovering near the list's edges scrolls it.
+    const box = list.getBoundingClientRect();
+    if (event.clientY < box.top + 36) list.scrollTop -= 14;
+    else if (event.clientY > box.bottom - 36) list.scrollTop += 14;
+    const row = elementOf(event)?.closest('[data-tray-channel]');
+    list.querySelectorAll('.drop-ready').forEach((other) => { if (other !== row) other.classList.remove('drop-ready'); });
+    if (row) row.classList.add('drop-ready');
+    tray.classList.toggle('hold-ready', !row && isExternal(event.dataTransfer));
+  });
+  tray.addEventListener('dragleave', (event) => { if (!tray.contains(event.relatedTarget)) clearMarks(); });
+  tray.addEventListener('drop', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    endPageDrop();
+    clearMarks();
+    const row = elementOf(event)?.closest('[data-tray-channel]');
+    if (!row) return holdDrop(event);
+    const channelId = Number(row.dataset.trayChannel);
+    if (isArchiveDrag(event.dataTransfer)) return connectDropped(event.dataTransfer, channelId);
+    if (pageDrag) return;
+    const items = readDrop(event.dataTransfer);
+    if (items.length) fileInto(items, channelId); else say('Nothing to add from that drop.');
+  });
+  updateHeld();
+}
+"""
+
+
 def layout(title: str, body: str) -> str:
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>{esc(title)} · CHANNEL</title><link rel='stylesheet' href='/style.css'></head>
-<body><header class='topbar'><a class='wordmark' href='/'>CHANNEL</a><nav class='main-nav'><a href='/'>CHANNEL</a></nav></header>
+<body><header class='topbar'><a class='wordmark' href='/'>CHANNEL</a><nav class='main-nav'><a href='/'>CHANNEL</a></nav>{'' if NATIVE_APP else TRAY_TOGGLE}</header>
+{'' if NATIVE_APP else TRAY_PANEL}<p class='toast' id='toast' role='status' aria-live='polite' hidden></p>
 <main>{body}</main><div class='modal' id='post-modal' hidden role='dialog' aria-modal='true' aria-label='Post detail'>
 <div class='modal-backdrop' data-close-modal></div><section class='modal-panel'>
 <button class='modal-close' type='button' data-close-modal aria-label='Close post'>CLOSE ×</button>
@@ -266,87 +702,7 @@ document.addEventListener('keydown', (event) => {{
   if (event.key === 'ArrowRight') {{ event.preventDefault(); stepModal(1); }}
   if (event.key === 'ArrowLeft') {{ event.preventDefault(); stepModal(-1); }}
 }});
-document.addEventListener('dragstart', (event) => {{
-  const channel = event.target.closest('[data-draggable-channel]');
-  if (channel) {{
-    event.dataTransfer.effectAllowed = 'copy';
-    event.dataTransfer.setData('application/x-archive-channel', channel.dataset.draggableChannel);
-    document.body.classList.add('dragging');
-    return;
-  }}
-  const block = event.target.closest('[data-draggable-block]');
-  if (!block) return;
-  event.dataTransfer.effectAllowed = 'copy';
-  event.dataTransfer.setData('text/plain', block.dataset.blockId);
-  document.body.classList.add('dragging');
-}});
-document.addEventListener('dragend', () => document.body.classList.remove('dragging'));
-// On a channel page, files dropped anywhere outside another drop target go into this channel.
-const pageChannel = document.querySelector('.block-grid[data-drop-channel]');
-const dropTarget = (event) => event.target.closest('[data-drop-channel]') || (event.dataTransfer.types.includes('Files') ? pageChannel : null);
-const endPageDrop = () => {{ document.body.classList.remove('page-drop'); if (pageChannel) pageChannel.classList.remove('drop-ready'); }};
-document.addEventListener('dragover', (event) => {{
-  if (event.dataTransfer.types.includes('Files')) event.preventDefault();
-  const target = dropTarget(event);
-  document.body.classList.toggle('page-drop', Boolean(target) && target === pageChannel && event.dataTransfer.types.includes('Files'));
-  if (!target) return;
-  event.preventDefault();
-  if (target !== pageChannel) target.classList.add('drop-ready');
-}});
-document.addEventListener('dragleave', (event) => {{
-  if (!event.relatedTarget) endPageDrop();
-  const target = event.target.closest('[data-drop-channel]');
-  if (target && !target.contains(event.relatedTarget)) target.classList.remove('drop-ready');
-}});
-document.addEventListener('drop', async (event) => {{
-  const target = dropTarget(event);
-  endPageDrop();
-  if (event.dataTransfer.files.length) event.preventDefault();
-  if (!target) return;
-  event.preventDefault();
-  target.classList.remove('drop-ready');
-  if (event.dataTransfer.files.length) {{
-    let uploaded = 0;
-    for (const [index, file] of [...event.dataTransfer.files].entries()) {{
-    if (!file.type.startsWith('image/')) continue;
-    let fileHandle = null;
-    const droppedItem = event.dataTransfer.items[index];
-    if (droppedItem && droppedItem.getAsFileSystemHandle) {{
-      try {{
-        fileHandle = await droppedItem.getAsFileSystemHandle();
-        if (fileHandle && fileHandle.requestPermission) {{
-          const permission = await fileHandle.requestPermission({{ mode: 'readwrite' }});
-          if (permission !== 'granted') fileHandle = null;
-        }}
-      }} catch (error) {{
-        fileHandle = null;
-      }}
-    }}
-    const form = new FormData();
-    form.append('channel_id', target.dataset.dropChannel);
-    form.append('image', file, file.name);
-    const response = await fetch('/upload-image', {{ method: 'POST', body: form }});
-    if (response.ok) {{
-      uploaded += 1;
-      if (fileHandle && fileHandle.remove) {{
-        try {{ await fileHandle.remove(); }} catch (error) {{}}
-      }}
-    }}
-    }}
-    if (!uploaded) {{ alert('No image files were added.'); return; }}
-    window.location.reload();
-  }} else if (event.dataTransfer.types.includes('application/x-archive-channel')) {{
-    const channelId = event.dataTransfer.getData('application/x-archive-channel');
-    if (channelId === target.dataset.dropChannel) return;
-    const response = await fetch('/connect-channel', {{ method: 'POST', headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }}, body: new URLSearchParams({{ source_id: channelId, channel_id: target.dataset.dropChannel }}) }});
-    if (response.ok) window.location.reload(); else alert('Could not add the channel.');
-  }} else {{
-    const blockId = event.dataTransfer.getData('text/plain');
-    if (!/^-?\\d+$/.test(blockId)) return;
-    const response = await fetch('/connect-block', {{ method: 'POST', headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }}, body: new URLSearchParams({{ block_id: blockId, channel_id: target.dataset.dropChannel }}) }});
-    if (response.ok) window.location.reload(); else alert('Could not add the block.');
-  }}
-}});
+{DROP_SCRIPT}
 const liveSearch = document.getElementById('archive-search');
 const channelCount = document.getElementById('channel-count');
 if (liveSearch) {{
@@ -552,7 +908,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.upload_file(body, images_only=self.path == "/upload-image")
             except (sqlite3.Error, ValueError, OSError) as error:
-                self.send_html(layout("Archive error", f"<section class='notice'><h1>Could not upload image</h1><p>{esc(error)}</p></section>"), 400)
+                self.send_html(layout("Archive error", f"<section class='notice'><h1>Could not upload file</h1><p>{esc(error)}</p></section>"), 400)
             return
         values = parse_qs(body.decode("utf-8"))
         try:
