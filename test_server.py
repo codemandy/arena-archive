@@ -18,8 +18,8 @@ class QuietHandler(server.Handler):
         pass
 
 
-class BatchEditTest(unittest.TestCase):
-    """Selecting several blocks or channels and renaming, moving, merging or deleting them."""
+class ServerTestCase(unittest.TestCase):
+    """A server on a fresh, empty archive, with helpers to make channels and blocks."""
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -63,6 +63,9 @@ class BatchEditTest(unittest.TestCase):
 
     def blocks_in(self, channel_id):
         return [row[0] for row in self.query("SELECT b.title FROM channel_blocks cb JOIN blocks b ON b.id = cb.block_id WHERE cb.channel_id = ? ORDER BY cb.position", channel_id)]
+
+class BatchEditTest(ServerTestCase):
+    """Selecting several blocks or channels and renaming, moving, merging or deleting them."""
 
     def test_rename_blocks_numbers_them_in_order(self):
         home = self.channel("Home")
@@ -172,6 +175,44 @@ class BatchEditTest(unittest.TestCase):
             self.assertIn("data-select-kind", page)
             self.assertIn("id='selection-bar'", page)
             self.assertIn("data-select-id", page)
+
+
+class ChannelHeaderTest(ServerTestCase):
+    """The channel page edits its name, description and category in place, and adds blocks."""
+
+    def test_set_channel_saves_only_the_fields_sent(self):
+        home, parent = self.channel("Home"), self.channel("Parent")
+        self.post("/connect-channel", {"source_id": home, "channel_id": parent})
+        saved = self.post("/set-channel", {"channel_id": home, "title": "  Studio  "})
+        self.assertEqual(saved["title"], "Studio")
+        self.assertEqual(self.blocks_in(parent), ["Studio"])
+        saved = self.post("/set-channel", {"channel_id": home, "description": "Work in progress", "category": "Art"})
+        self.assertEqual((saved["title"], saved["description"], saved["category"]), ("Studio", "Work in progress", "Art"))
+        self.assertEqual(self.query("SELECT name FROM categories"), [("Art",)])
+        self.post("/set-channel", {"channel_id": home, "category": ""})
+        self.assertEqual(self.query("SELECT category FROM channels WHERE id = ?", home)[0][0], "")
+
+    def test_set_channel_refuses_an_empty_name(self):
+        home = self.channel("Home")
+        with self.assertRaises(HTTPError):
+            self.post("/set-channel", {"channel_id": home, "title": " "})
+        self.assertEqual(self.query("SELECT title FROM channels WHERE id = ?", home)[0][0], "Home")
+
+    def test_add_block_turns_a_lone_link_into_a_link_block(self):
+        home = self.channel("Home")
+        self.post("/add-block", {"channel_id": home, "text": "https://www.are.na/blog/"})
+        self.post("/add-block", {"channel_id": home, "text": "First line\nmore text"})
+        rows = self.query("SELECT b.type, b.title, b.source_url, b.content FROM channel_blocks cb JOIN blocks b ON b.id = cb.block_id WHERE cb.channel_id = ? ORDER BY cb.position", home)
+        self.assertEqual(rows, [("link", "are.na/blog", "https://www.are.na/blog/", ""), ("text", "First line", "", "First line\nmore text")])
+
+    def test_channel_page_has_no_forms_for_editing(self):
+        home = self.channel("Home")
+        with urlopen(f"{self.base}/channel/{home}") as response:
+            page = response.read().decode()
+        self.assertIn("data-channel-field='title'", page)
+        self.assertIn("class='channel-toolbar'", page)
+        self.assertNotIn("action='/rename-channel'", page)
+        self.assertNotIn("ADD LOCAL BLOCK", page)
 
 
 if __name__ == "__main__":

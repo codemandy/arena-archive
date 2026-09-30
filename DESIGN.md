@@ -83,9 +83,28 @@ modal open in a new tab.
 
 ### Editing
 
-Local editing is grouped in one `EDITING` area. It supports creating channels,
-creating categories, adding text/link blocks, removing blocks from channels, and
-deleting channels. These operations affect the local archive only.
+On the main page, local editing is grouped in one `EDITING` area for creating
+channels and categories. These operations affect the local archive only.
+
+### Channel Header
+
+A channel page has no editing forms. From the top:
+
+- `← BACK` on the left. A ☆/★ favorite toggle and a `⋯` menu on the right.
+  `Delete channel…` lives in the menu and asks first, with focus on `Cancel`.
+- One facts line: visibility · category · block count · last update. The
+  category is a dashed chip that opens a picker. Pick one, or type a name to
+  make a new category.
+- The display title and the description edit in place. Return saves, Escape
+  puts the old text back, and an empty name is refused. Hover shows a hairline
+  and focus shows an ink underline.
+- One toolbar above the grid: `VIEW` on the left, `SELECT BLOCKS` and `+ ADD`
+  on the right. It sticks under the top bar while scrolling.
+- `+ ADD` opens one box: a lone link becomes a link block, any other text
+  becomes a text block, and `CHOOSE FILES…` adds files. `⌘↩` adds. `⌘V` on the
+  page, outside a field, adds what's on the clipboard.
+- While a block is dragged, a shelf of channels slides in from the right,
+  favorites first. Dropping on one adds the block there.
 
 ### Selection
 

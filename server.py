@@ -265,6 +265,201 @@ SELECTION_SCRIPT = r"""<script>
 </script>"""
 
 
+# The channel page header: the name and description edit in place, the category is a
+# picker, and + ADD (or ⌘V anywhere) adds text, links and files.
+CHANNEL_SCRIPT = r"""<script>
+(() => {
+  const heading = document.querySelector('.channel-heading[data-channel-id]');
+  if (!heading || readOnly) return;
+  const channelId = heading.dataset.channelId;
+  const send = async (path, fields) => {
+    const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ channel_id: channelId, ...fields }) });
+    if (!response.ok) {
+      const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+      throw new Error(page.querySelector('.notice p')?.textContent || 'The archive could not be updated.');
+    }
+    return response.json();
+  };
+
+  // Popovers: one open at a time, closed by a click elsewhere or Escape.
+  let openPopover = null;
+  const closePopover = () => {
+    if (!openPopover) return;
+    openPopover.popover.hidden = true;
+    openPopover.anchor.setAttribute('aria-expanded', 'false');
+    openPopover = null;
+  };
+  const showPopover = (popover, anchor, place) => {
+    if (openPopover && openPopover.popover === popover) { closePopover(); return; }
+    closePopover();
+    popover.hidden = false;
+    anchor.setAttribute('aria-expanded', 'true');
+    if (place) place(popover, anchor);
+    openPopover = { popover, anchor };
+    popover.querySelector('input:not([type=file]), textarea')?.focus();
+  };
+  document.addEventListener('click', (event) => {
+    if (openPopover && !openPopover.popover.contains(event.target) && !openPopover.anchor.contains(event.target)) closePopover();
+    const menu = document.querySelector('.channel-menu[open]');
+    if (menu && !menu.contains(event.target)) menu.open = false;
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (openPopover) { const { anchor } = openPopover; closePopover(); anchor.focus(); }
+    document.querySelector('.channel-menu[open]')?.removeAttribute('open');
+  });
+
+  // Name and description: edit in place. Return saves, Escape puts the old text back.
+  document.querySelectorAll('[data-channel-field]').forEach((field) => {
+    if (!field.isContentEditable) return;
+    const name = field.dataset.channelField;
+    let saved = field.textContent.trim();
+    field.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && (name === 'title' || !event.shiftKey)) { event.preventDefault(); field.blur(); }
+      if (event.key === 'Escape') { field.textContent = saved; field.blur(); }
+    });
+    field.addEventListener('paste', (event) => {
+      event.preventDefault();
+      document.execCommand('insertText', false, event.clipboardData.getData('text/plain'));
+    });
+    field.addEventListener('blur', async () => {
+      const value = name === 'title' ? field.textContent.replace(/\s+/g, ' ').trim() : field.textContent.trim();
+      if (!value) field.textContent = '';
+      if (value === saved || (name === 'title' && !value)) { field.textContent = saved; return; }
+      try {
+        await send('/set-channel', { [name]: value });
+        saved = value;
+        field.textContent = value;
+        if (name === 'title') document.title = `${value} · CHANNEL`;
+      } catch (error) {
+        field.textContent = saved;
+        alert(error.message);
+      }
+    });
+  });
+
+  // Category: pick one, or type a name to make a new one.
+  const categoryButton = document.querySelector('[data-category-toggle]');
+  const categoryPopover = document.getElementById('category-popover');
+  if (categoryButton && categoryPopover) {
+    const search = categoryPopover.querySelector('.popover-search');
+    const list = categoryPopover.querySelector('.popover-list');
+    const options = () => [...list.querySelectorAll('[role=option]')];
+    const highlight = (option) => options().forEach((other) => other.classList.toggle('is-active', other === option));
+    const filter = () => {
+      const term = search.value.trim();
+      const lower = term.toLowerCase();
+      list.querySelector('.popover-new')?.remove();
+      options().forEach((option) => { option.hidden = Boolean(lower) && !option.textContent.toLowerCase().includes(lower); });
+      if (term && !options().some((option) => option.dataset.categoryValue.toLowerCase() === lower)) {
+        const make = document.createElement('button');
+        make.type = 'button';
+        make.setAttribute('role', 'option');
+        make.className = 'popover-new';
+        make.dataset.categoryValue = term;
+        make.innerHTML = '<span>NEW CATEGORY</span> ';
+        make.append(term);
+        list.append(make);
+      }
+      highlight(term ? options().find((option) => !option.hidden) : null);
+    };
+    const choose = async (option) => {
+      const value = option.dataset.categoryValue;
+      try {
+        const saved = await send('/set-channel', { category: value });
+        categoryButton.querySelector('[data-category-label]').textContent = (saved.category || 'Uncategorized').toUpperCase();
+        categoryButton.setAttribute('aria-label', `Category: ${saved.category || 'Uncategorized'}`);
+        if (option.classList.contains('popover-new')) { option.classList.remove('popover-new'); option.textContent = value; }
+        options().forEach((other) => other.setAttribute('aria-selected', String(other.dataset.categoryValue === saved.category)));
+        search.value = '';
+        filter();
+        closePopover();
+        categoryButton.focus();
+      } catch (error) { alert(error.message); }
+    };
+    categoryButton.addEventListener('click', () => showPopover(categoryPopover, categoryButton, (popover, anchor) => {
+      const box = anchor.getBoundingClientRect();
+      popover.style.top = `${box.bottom + window.scrollY + 8}px`;
+      popover.style.left = `${Math.max(16, Math.min(box.left + window.scrollX, document.documentElement.clientWidth - popover.offsetWidth - 16))}px`;
+    }));
+    search.addEventListener('input', filter);
+    search.addEventListener('keydown', (event) => {
+      const visible = options().filter((option) => !option.hidden);
+      const index = visible.findIndex((option) => option.classList.contains('is-active'));
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const next = visible[Math.max(0, Math.min(visible.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))];
+        highlight(next);
+        next?.scrollIntoView({ block: 'nearest' });
+      } else if (event.key === 'Enter' && visible[Math.max(0, index)]) {
+        event.preventDefault();
+        choose(visible[Math.max(0, index)]);
+      }
+    });
+    list.addEventListener('click', (event) => { const option = event.target.closest('[role=option]'); if (option) choose(option); });
+  }
+
+  // + ADD: a lone link becomes a link block, other text a text block, files become blocks.
+  const addButton = document.querySelector('[data-add-toggle]');
+  const addPopover = document.getElementById('add-popover');
+  const upload = async (files) => {
+    let added = 0;
+    for (const file of files) {
+      const form = new FormData();
+      form.append('channel_id', channelId);
+      form.append('file', file, file.name || 'pasted');
+      if ((await fetch('/upload-file', { method: 'POST', body: form })).ok) added += 1;
+    }
+    if (!added) throw new Error('The files could not be added.');
+  };
+  if (addButton && addPopover) {
+    const form = addPopover.querySelector('[data-add-form]');
+    const text = form.elements.text;
+    const message = form.querySelector('.batch-error');
+    const run = async (work) => {
+      message.hidden = true;
+      form.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+      try { await work(); window.location.reload(); }
+      catch (error) { message.textContent = error.message; message.hidden = false; form.querySelectorAll('button').forEach((button) => { button.disabled = false; }); }
+    };
+    addButton.addEventListener('click', () => showPopover(addPopover, addButton));
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!text.value.trim()) { text.focus(); return; }
+      run(() => send('/add-block', { text: text.value }));
+    });
+    text.addEventListener('keydown', (event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) form.requestSubmit(); });
+    form.querySelector('[data-add-file]').addEventListener('change', (event) => { if (event.target.files.length) run(() => upload([...event.target.files])); });
+  }
+  // ⌘V on the page (not in a field) adds what's on the clipboard to this channel.
+  document.addEventListener('paste', async (event) => {
+    if (!modal.hidden || document.querySelector('dialog[open]') || event.target.closest('input, textarea, [contenteditable]')) return;
+    const files = [...event.clipboardData.files];
+    const pasted = event.clipboardData.getData('text/plain');
+    if (!files.length && !pasted.trim()) return;
+    event.preventDefault();
+    document.body.classList.add('is-adding');
+    try {
+      if (files.length) await upload(files); else await send('/add-block', { text: pasted });
+      window.location.reload();
+    } catch (error) {
+      document.body.classList.remove('is-adding');
+      alert(error.message);
+    }
+  });
+
+  // Delete lives in the ⋯ menu and asks first.
+  const deleteDialog = document.getElementById('delete-channel-dialog');
+  document.querySelector('[data-delete-channel]')?.addEventListener('click', () => {
+    document.querySelector('.channel-menu').open = false;
+    deleteDialog.showModal();
+    deleteDialog.querySelector('[data-dialog-cancel]').focus();
+  });
+  deleteDialog?.addEventListener('click', (event) => { if (event.target === deleteDialog || event.target.closest('[data-dialog-cancel]')) deleteDialog.close(); });
+})();
+</script>"""
+
+
 def layout(title: str, body: str) -> str:
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -624,7 +819,7 @@ if (liveSearch) {{
     if (channelCount) channelCount.textContent = `${{visible}} of ${{total}} channels`;
   }});
 }}
-</script>{SELECTION_SCRIPT}</body></html>"""
+</script>{SELECTION_SCRIPT}{CHANNEL_SCRIPT}</body></html>"""
 
 
 def db():
@@ -686,6 +881,33 @@ def append_block(connection: sqlite3.Connection, channel_id: int, block_id: int,
         position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
     now = timestamp()
     connection.execute("INSERT OR IGNORE INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, json.dumps({"local": True, "connected_at": now})))
+
+
+def insert_block(connection: sqlite3.Connection, channel_id: int, kind: str, title: str, content: str = "", source: str = "") -> int:
+    require_channel(connection, channel_id)
+    block_id = local_id(connection, "blocks")
+    now = timestamp()
+    connection.execute("INSERT INTO blocks (id, type, title, content, description, author_name, author_slug, source_url, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, kind, title, content, "", "Local archive", "local", source, now, now, json.dumps({"local": True, "created_at": now})))
+    append_block(connection, channel_id, block_id)
+    return block_id
+
+
+def block_from_text(text: str) -> tuple[str, str, str, str]:
+    """(type, title, content, source) for pasted text: a lone URL becomes a link block."""
+    text = text.strip()
+    if re.fullmatch(r"(https?://|www\.)\S+", text):
+        source = text if text.startswith("http") else "https://" + text
+        parsed = urlparse(source)
+        return "link", (parsed.netloc + parsed.path).removeprefix("www.").rstrip("/")[:300], "", source
+    first_line = text.splitlines()[0].strip() if text else ""
+    return "text", (first_line[:80] + ("…" if len(first_line) > 80 else "")) or "Untitled block", text, ""
+
+
+def short_date(value: str | None) -> str:
+    try:
+        return time.strftime("%-d %b %Y", time.strptime((value or "")[:10], "%Y-%m-%d")).upper()
+    except ValueError:
+        return ""
 
 
 def channel_block(connection: sqlite3.Connection, channel_id: int) -> int:
@@ -974,16 +1196,17 @@ class Handler(BaseHTTPRequestHandler):
             except (sqlite3.Error, ValueError, OSError) as error:
                 self.send_html(layout("Archive error", f"<section class='notice'><h1>Could not upload image</h1><p>{esc(error)}</p></section>"), 400)
             return
-        values = parse_qs(body.decode("utf-8"))
+        # Blank values are kept, so a field can be cleared (an empty category or description).
+        values = parse_qs(body.decode("utf-8"), keep_blank_values=True)
         try:
             if self.path == "/create-channel":
                 self.create_channel(values)
-            elif self.path == "/update-channel":
-                self.update_channel(values)
-            elif self.path == "/rename-channel":
-                self.rename_channel(values)
+            elif self.path == "/set-channel":
+                self.set_channel(values)
             elif self.path == "/create-block":
                 self.create_block(values)
+            elif self.path == "/add-block":
+                self.add_block(values)
             elif self.path == "/create-category":
                 self.create_category(values)
             elif self.path == "/remove-block":
@@ -1053,27 +1276,28 @@ class Handler(BaseHTTPRequestHandler):
         connection.close()
         self.redirect(f"/channel/{channel_id}")
 
-    def update_channel(self, values: dict[str, list[str]]) -> None:
+    def set_channel(self, values: dict[str, list[str]]) -> None:
+        """Save whichever of a channel's title, description and category were sent."""
         channel_id = int(form_value(values, "channel_id"))
-        category = form_value(values, "new_category") or form_value(values, "category")
         connection = db()
-        connection.execute("UPDATE channels SET category = ?, updated_at = ? WHERE id = ?", (category, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), channel_id))
-        if category:
-            connection.execute("INSERT OR IGNORE INTO categories(name) VALUES (?)", (category,))
+        require_channel(connection, channel_id)
+        if "title" in values:
+            title = form_value(values, "title")[:300]
+            if not title:
+                raise ValueError("channel name cannot be empty")
+            set_channel_title(connection, channel_id, title)
+        if "description" in values:
+            connection.execute("UPDATE channels SET description = ? WHERE id = ?", (values["description"][0].strip()[:2000], channel_id))
+        if "category" in values:
+            category = form_value(values, "category")[:100]
+            connection.execute("UPDATE channels SET category = ? WHERE id = ?", (category, channel_id))
+            if category:
+                connection.execute("INSERT OR IGNORE INTO categories(name) VALUES (?)", (category,))
+        connection.execute("UPDATE channels SET updated_at = ? WHERE id = ?", (timestamp(), channel_id))
+        channel = require_channel(connection, channel_id)
         connection.commit()
         connection.close()
-        self.redirect(f"/channel/{channel_id}")
-
-    def rename_channel(self, values: dict[str, list[str]]) -> None:
-        channel_id = int(form_value(values, "channel_id"))
-        title = form_value(values, "title")
-        if not title:
-            raise ValueError("channel name cannot be empty")
-        connection = db()
-        set_channel_title(connection, channel_id, title)
-        connection.commit()
-        connection.close()
-        self.redirect(f"/channel/{channel_id}")
+        self.send_json({"title": channel["title"], "description": channel["description"] or "", "category": channel["category"] or ""})
 
     def create_category(self, values: dict[str, list[str]]) -> None:
         category = form_value(values, "category")
@@ -1089,21 +1313,23 @@ class Handler(BaseHTTPRequestHandler):
         kind = form_value(values, "type") or "text"
         if kind not in {"text", "link"}:
             kind = "text"
-        title = form_value(values, "title") or "Untitled block"
-        content = form_value(values, "content")
-        source = form_value(values, "source_url") if kind == "link" else ""
         connection = db()
-        if not connection.execute("SELECT 1 FROM channels WHERE id = ?", (channel_id,)).fetchone():
-            raise ValueError("channel not found")
-        block_id = local_id(connection, "blocks")
-        position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        raw = json.dumps({"local": True, "created_at": now})
-        connection.execute("INSERT INTO blocks (id, type, title, content, description, author_name, author_slug, source_url, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, kind, title, content, "", "Local archive", "local", source, now, now, raw))
-        connection.execute("INSERT INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, raw))
+        insert_block(connection, channel_id, kind, form_value(values, "title") or "Untitled block", form_value(values, "content"), form_value(values, "source_url") if kind == "link" else "")
         connection.commit()
         connection.close()
         self.redirect(f"/channel/{channel_id}")
+
+    def add_block(self, values: dict[str, list[str]]) -> None:
+        """A block from typed or pasted text: a lone link becomes a link block, anything else text."""
+        channel_id = int(form_value(values, "channel_id"))
+        text = values.get("text", [""])[0].strip()
+        if not text:
+            raise ValueError("nothing to add")
+        connection = db()
+        block_id = insert_block(connection, channel_id, *block_from_text(text[:20000]))
+        connection.commit()
+        connection.close()
+        self.send_json({"block_id": block_id})
 
     def remove_block(self, values: dict[str, list[str]]) -> None:
         channel_id = int(form_value(values, "channel_id"))
@@ -1396,7 +1622,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         blocks = connection.execute("SELECT b.*, a.path AS asset_path, a.content_type AS asset_content_type, cb.channel_id AS parent_channel_id FROM blocks b JOIN channel_blocks cb ON cb.block_id = b.id LEFT JOIN assets a ON a.block_id = b.id WHERE cb.channel_id = ? ORDER BY cb.position", (channel_id,)).fetchall()
         categories = connection.execute("SELECT name FROM categories ORDER BY lower(name)").fetchall()
-        targets = connection.execute("SELECT id, title, category FROM channels WHERE id != ? ORDER BY lower(title)", (channel_id,)).fetchall()
+        targets = connection.execute("SELECT id, title, category, favorite FROM channels WHERE id != ? ORDER BY favorite DESC, lower(title)", (channel_id,)).fetchall()
         connection.close()
         block_view = self.cookie("block_view")
         if block_view not in BLOCK_VIEWS:
@@ -1404,14 +1630,33 @@ class Handler(BaseHTTPRequestHandler):
         grid = abc_grid(blocks) if block_view == "abc" else "".join(block_card(row) for row in blocks)
         empty = '<div class="notice">No imported blocks in this channel.</div>'
         view_switch = "<div class='view-switch' role='group' aria-label='Block view'><span class='view-label'>VIEW</span>" + "".join(f"<button type='button' data-view-option='{view}' aria-pressed='{'true' if view == block_view else 'false'}'>{view.upper()}</button>" for view in BLOCK_VIEWS) + "</div>"
-        category_options = "<option value=''>Uncategorized</option>" + "".join(f"<option value='{esc(row['name'])}'{' selected' if row['name'] == channel['category'] else ''}>{esc(row['name'])}</option>" for row in categories)
-        target_cards = "".join(f"<div class='drop-channel' data-drop-channel='{row['id']}'><span>{esc(row['category'] or 'UNCATEGORIZED').upper()}</span><strong>{title_markup(row['title'])}</strong></div>" for row in targets)
-        drop_shelf = f"<details class='drop-shelf'><summary>DRAG TO ADD TO ANOTHER CHANNEL</summary><input class='drop-search' type='search' placeholder='Find a channel' oninput=\"this.parentElement.querySelectorAll('[data-drop-channel]').forEach((card) => card.hidden = !card.textContent.toLowerCase().includes(this.value.toLowerCase()))\"><div class='drop-channel-grid'>{target_cards}</div></details>"
-        editor = f"<section class='editor-panel'><p class='eyebrow'>CHANNEL NAME</p><form method='post' action='/rename-channel' class='editor-form'><input type='hidden' name='channel_id' value='{channel_id}'><input name='title' value='{esc(channel['title'])}' placeholder='Channel name' required aria-label='Channel name'><button type='submit'>RENAME CHANNEL</button></form><p class='eyebrow'>CHANNEL CATEGORY</p><form method='post' action='/update-channel' class='editor-form'><input type='hidden' name='channel_id' value='{channel_id}'><select name='category'>{category_options}</select><input name='new_category' placeholder='Or make a new category'><button type='submit'>SAVE CATEGORY</button></form><p class='eyebrow'>ADD LOCAL BLOCK</p><form method='post' action='/create-block' class='editor-form block-editor'><input type='hidden' name='channel_id' value='{channel_id}'><select name='type'><option value='text'>Text</option><option value='link'>Link</option></select><input name='title' placeholder='Title'><textarea name='content' placeholder='Text or link description'></textarea><input name='source_url' type='url' placeholder='Source URL (for links)'><button type='submit'>ADD BLOCK</button></form></section>"
-        favorite_label = "★ FAVORITE" if channel["favorite"] else "☆ ADD TO FAVORITES"
-        favorite = f"<form method='post' action='/toggle-favorite'><input type='hidden' name='channel_id' value='{channel_id}'><button class='favorite-button{' is-favorite' if channel['favorite'] else ''}' type='submit' title='{'Remove from favorites' if channel['favorite'] else 'Add to favorites'}'>{favorite_label}</button></form>"
-        delete = f"<form method='post' action='/delete-channel' onsubmit=\"return confirm('Delete this local channel?')\"><input type='hidden' name='channel_id' value='{channel_id}'><button class='danger-button' type='submit'>DELETE CHANNEL</button></form>"
-        body = f"<a class='back' href='/'>← BACK</a><section class='channel-heading'><p class='eyebrow'>CHANNEL · {esc(channel['visibility'] or 'UNKNOWN').upper()}</p><h1>{title_markup(channel['title'] or channel['slug'])}</h1><p>{esc(channel['description'])}</p><div class='channel-actions'>{favorite}{select_button('blocks')}{delete}</div></section>{drop_shelf}{editor}{view_switch}<section class='block-grid' data-view='{block_view}' data-drop-channel='{channel_id}' data-select-kind='blocks'>{grid or empty}</section>{selection_bar('blocks')}"
+        editable = "" if READ_ONLY else " contenteditable='plaintext-only' spellcheck='false'"
+        category = channel["category"] or ""
+        # Category: a chip in the facts line that opens a picker, instead of a form.
+        if READ_ONLY:
+            category_chip = f"<span>{esc(category or 'Uncategorized').upper()}</span>"
+            category_picker = ""
+        else:
+            category_chip = f"<button type='button' class='fact-button' data-category-toggle aria-expanded='false' aria-label='Category: {esc(category or 'Uncategorized')}'><span data-category-label>{esc(category or 'Uncategorized').upper()}</span> ▾</button>"
+            options = "".join(f"<button type='button' role='option' data-category-value='{esc(row['name'])}' aria-selected='{'true' if row['name'] == category else 'false'}'>{esc(row['name'])}</button>" for row in categories)
+            category_picker = f"<div class='popover category-popover' id='category-popover' hidden><input type='search' class='popover-search' placeholder='Find or make a category' aria-label='Category' autocomplete='off'><div class='popover-list' role='listbox'><button type='button' role='option' data-category-value='' aria-selected='{'true' if not category else 'false'}'>Uncategorized</button>{options}</div></div>"
+        updated = short_date(channel["updated_at"])
+        updated_fact = f"<span aria-hidden='true'>·</span><span>UPDATED {updated}</span>" if updated else ""
+        facts = f"<p class='channel-facts'><span>{esc(channel['visibility'] or 'unknown').upper()}</span><span aria-hidden='true'>·</span>{category_chip}<span aria-hidden='true'>·</span><span>{len(blocks)} {'BLOCK' if len(blocks) == 1 else 'BLOCKS'}</span>{updated_fact}</p>"
+        title = f"<h1 class='channel-title' data-channel-field='title'{editable} aria-label='Channel name'>{title_markup(channel['title'] or channel['slug'])}</h1>"
+        description = f"<p class='channel-description' data-channel-field='description'{editable} data-placeholder='Add a description' aria-label='Description'>{esc(channel['description'])}</p>" if not READ_ONLY or channel["description"] else ""
+        star = f"<form method='post' action='/toggle-favorite'><input type='hidden' name='channel_id' value='{channel_id}'><button class='icon-button star-button' type='submit' aria-pressed='{'true' if channel['favorite'] else 'false'}' title='{'Remove from favorites' if channel['favorite'] else 'Add to favorites'}'>{'★' if channel['favorite'] else '☆'}</button></form>"
+        menu = "" if READ_ONLY else "<details class='channel-menu'><summary class='icon-button' title='More' aria-label='More actions'>⋯</summary><div class='popover menu-popover'><button type='button' class='danger' data-delete-channel>DELETE CHANNEL…</button></div></details>"
+        delete_dialog = "" if READ_ONLY else f"<dialog class='batch-dialog' id='delete-channel-dialog'><form method='post' action='/delete-channel'><input type='hidden' name='channel_id' value='{channel_id}'><p class='eyebrow'>DELETE CHANNEL</p><p class='batch-question'>Delete “{esc(channel['title'])}”?</p><p class='batch-hint'>Its blocks are deleted with their files, unless a block is also in another channel. This can’t be undone.</p><div class='batch-actions'><button type='button' data-dialog-cancel>CANCEL</button><button type='submit' class='danger'>DELETE CHANNEL</button></div></form></dialog>"
+        heading = f"<section class='channel-heading' data-channel-id='{channel_id}'><div class='channel-topline'><a class='back' href='/'>← BACK</a><div class='channel-tools'>{star}{menu}</div></div>{facts}{title}{description}</section>"
+        # One toolbar for the grid: view, select, add. It sticks under the top bar.
+        add = "" if READ_ONLY else "<button type='button' class='select-button' data-add-toggle aria-expanded='false'>+ ADD</button>"
+        add_panel = "" if READ_ONLY else "<div class='popover add-popover' id='add-popover' hidden><form data-add-form><textarea name='text' rows='3' placeholder='Paste a link or type text' aria-label='Link or text'></textarea><div class='add-actions'><label class='add-file'><input type='file' multiple hidden data-add-file>CHOOSE FILES…</label><span class='batch-hint'>⌘↩ adds. ⌘V on the page adds too.</span><button type='submit'>ADD</button></div><p class='batch-error' hidden></p></form></div>"
+        toolbar = f"<div class='channel-toolbar'>{view_switch}<div class='toolbar-actions'>{select_button('blocks')}{add}{add_panel}</div></div>"
+        # While a block is dragged, the channels to drop it on slide in from the side.
+        target_cards = "".join(f"<div class='drop-channel' data-drop-channel='{row['id']}'><span>{'★ ' if row['favorite'] else ''}{esc(row['category'] or 'UNCATEGORIZED').upper()}</span><strong>{title_markup(row['title'])}</strong></div>" for row in targets)
+        drag_shelf = f"<aside class='drag-shelf' aria-hidden='true'><p class='eyebrow'>DROP TO ADD TO</p><div class='drag-shelf-list'>{target_cards}</div></aside>" if targets and not READ_ONLY else ""
+        body = f"{heading}{category_picker}{toolbar}<section class='block-grid' data-view='{block_view}' data-drop-channel='{channel_id}' data-select-kind='blocks'>{grid or empty}</section>{selection_bar('blocks')}{drag_shelf}{delete_dialog}"
         self.send_html(layout(channel["title"], body))
 
     def search(self, query: str) -> None:
