@@ -2,15 +2,14 @@
 //
 // Build with ./mac/build.sh (Command Line Tools only, no Xcode).
 //
-// By default the app serves an archive folder on this Mac (archive.db +
-// assets/) in place, and remembers the folder you pick on first launch.
+// Local mode serves an archive folder on this Mac (archive.db + assets/) in
+// place, and remembers the folder you pick on first launch.
 //
-// iCloud sync is not switched on yet (see README › Planned). When the
-// `useICloud` default is true, data lives in iCloud Drive › ArenaArchive: the
-// app works on a local copy of archive.db and writes it back to iCloud,
-// because iCloud syncs whole files and would otherwise clobber a live SQLite
-// database. A lock file in the iCloud folder tells the other Mac the archive
-// is in use.
+// File › Move Archive to iCloud Drive… switches to iCloud mode (the `useICloud`
+// default). Data then lives in iCloud Drive › CHANNEL: the app works on a
+// local copy of archive.db and writes it back to iCloud, because iCloud syncs
+// whole files and would otherwise clobber a live SQLite database. A lock file
+// in the iCloud folder tells the other Mac the archive is in use.
 
 import AppKit
 import CryptoKit
@@ -20,7 +19,10 @@ import WebKit
 let appName = "CHANNEL"
 let syncInterval: TimeInterval = 20
 let fm = FileManager.default
-let useICloud = UserDefaults.standard.bool(forKey: "useICloud")
+var useICloud: Bool {
+    get { UserDefaults.standard.bool(forKey: "useICloud") }
+    set { UserDefaults.standard.set(newValue, forKey: "useICloud") }
+}
 
 enum Paths {
     static let home = fm.homeDirectoryForCurrentUser
@@ -28,10 +30,12 @@ enum Paths {
     // The ARENA_* overrides exist for testing against a scratch folder.
     static let iCloudDrive = environment["ARENA_ICLOUD_DRIVE"].map { URL(fileURLWithPath: $0) }
         ?? home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
-    static let cloud = iCloudDrive.appendingPathComponent("ArenaArchive")
+    static let cloud = iCloudDrive.appendingPathComponent("CHANNEL")
     static let cloudDB = cloud.appendingPathComponent("archive.db")
     static let cloudAssets = cloud.appendingPathComponent("assets")
     static let lock = cloud.appendingPathComponent("lock.json")
+    // One file per Mac, so the two Macs never write the same file.
+    static let versions = cloud.appendingPathComponent("versions")
     static let support = environment["ARENA_SUPPORT"].map { URL(fileURLWithPath: $0) }
         ?? home.appendingPathComponent("Library/Application Support/ArenaArchive")
     static let localDB = support.appendingPathComponent("archive.db")
@@ -39,6 +43,7 @@ enum Paths {
     static let state = support.appendingPathComponent("sync-state.json")
     static let upload = support.appendingPathComponent("upload.db")
     static let log = support.appendingPathComponent("server.log")
+    static let thumbs = support.appendingPathComponent("thumbs")
 }
 
 // MARK: - Files
@@ -162,6 +167,48 @@ func releaseLock() {
     try? coordinatedWrite(Paths.lock) { try fm.removeItem(at: $0) }
 }
 
+// MARK: - App version
+
+/// What build.sh wrote into Info.plist: the build number is the commit count.
+enum AppVersion {
+    static let info = Bundle.main.infoDictionary ?? [:]
+    static let build = Int(info["CFBundleVersion"] as? String ?? "") ?? 0
+    static let commit = info["CHANNELCommit"] as? String ?? "unknown"
+    static let sourcePath = (info["CHANNELSourcePath"] as? String).map { URL(fileURLWithPath: $0) }
+    static var updateScript: URL? {
+        guard let script = sourcePath?.appendingPathComponent("mac/update.sh"),
+              fm.isExecutableFile(atPath: script.path) else { return nil }
+        return script
+    }
+}
+
+struct VersionRecord: Codable {
+    let machineID: String
+    let machineName: String
+    let build: Int
+    let commit: String
+    let updated: Date
+}
+
+/// Records this Mac's version in iCloud and returns another Mac's record if
+/// that Mac runs a newer build.
+func publishVersionAndFindNewer() -> VersionRecord? {
+    try? fm.createDirectory(at: Paths.versions, withIntermediateDirectories: true)
+    let mine = VersionRecord(machineID: Machine.id, machineName: Machine.name, build: AppVersion.build,
+                             commit: AppVersion.commit, updated: Date())
+    let data = try? jsonEncoder().encode(mine)
+    try? coordinatedWrite(Paths.versions.appendingPathComponent("\(Machine.id).json")) { try data?.write(to: $0, options: .atomic) }
+    let files = (try? fm.contentsOfDirectory(at: Paths.versions, includingPropertiesForKeys: nil)) ?? []
+    return files
+        .filter { $0.pathExtension == "json" && $0.deletingPathExtension().lastPathComponent != Machine.id }
+        .compactMap { file -> VersionRecord? in
+            waitForDownload(file, timeout: 5)
+            return try? coordinatedRead(file) { try jsonDecoder().decode(VersionRecord.self, from: Data(contentsOf: $0)) }
+        }
+        .filter { $0.build > AppVersion.build }
+        .max { $0.build < $1.build }
+}
+
 // MARK: - Sync
 
 /// Hashes of the local and iCloud databases the last time they were in sync.
@@ -238,7 +285,7 @@ enum Sync {
         case (true, true):
             let name = try saveConflictCopy()
             try pull()
-            return "Unsynced changes on this Mac clashed with newer changes from iCloud. They were saved as “\(name)” in iCloud Drive › ArenaArchive."
+            return "Unsynced changes on this Mac clashed with newer changes from iCloud. They were saved as “\(name)” in iCloud Drive › CHANNEL."
         }
     }
 
@@ -273,7 +320,7 @@ final class Server {
     let process = Process()
     let port: Int
 
-    init(database: URL, assets: URL = Paths.cloudAssets, readOnly: Bool = false) throws {
+    init(database: URL, assets: URL = Paths.cloudAssets, thumbs: URL = Paths.thumbs, readOnly: Bool = false) throws {
         port = Server.freePort()
         guard let script = Bundle.main.url(forResource: "server", withExtension: "py") else {
             throw SyncError("server.py is missing from the app bundle. Rebuild with mac/build.sh.")
@@ -285,6 +332,7 @@ final class Server {
         var environment = ProcessInfo.processInfo.environment
         environment["ARENA_DATABASE"] = database.path
         environment["ARENA_ASSETS"] = assets.path
+        environment["ARENA_THUMBS"] = thumbs.path
         environment["ARENA_READONLY"] = readOnly ? "1" : "0"
         environment["ARENA_PARENT_PID"] = String(getpid())
         environment["PORT"] = String(port)
@@ -338,6 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var window: NSWindow!
     let webView = ArchiveWebView(frame: .zero, configuration: WKWebViewConfiguration())
     let status = NSTextField(labelWithString: "Opening archive…")
+    let statusView = NSView()
     var server: Server?
     var readOnly = false
     var timer: Timer?
@@ -354,16 +403,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         NSApp.activate(ignoringOtherApps: true)
         try? fm.createDirectory(at: Paths.support, withIntermediateDirectories: true)
 
-        guard useICloud else { return openLocal() }
+        useICloud ? startICloud() : openLocal()
+    }
+
+    /// Opens the iCloud archive, first copying the local archive folder there
+    /// when iCloud Drive doesn't have one yet.
+    func startICloud() {
         guard fm.fileExists(atPath: Paths.iCloudDrive.path) else {
             fail("iCloud Drive is off", "Turn on iCloud Drive in System Settings › Apple Account › iCloud, then open the app again.")
             return
         }
         if fm.fileExists(atPath: Paths.cloudDB.path) {
             checkLockAndOpen()
+        } else if let folder = localFolder, fm.fileExists(atPath: folder.appendingPathComponent("archive.db").path) {
+            migrate(from: folder)
         } else {
             askForExistingArchive()
         }
+    }
+
+    @objc func moveToICloud() {
+        guard fm.fileExists(atPath: Paths.iCloudDrive.path) else {
+            return showAlert("iCloud Drive is off", "Turn on iCloud Drive in System Settings › Apple Account › iCloud, then try again.")
+        }
+        let joining = fm.fileExists(atPath: Paths.cloudDB.path)
+        let alert = NSAlert()
+        if joining {
+            alert.messageText = "Use the archive in iCloud Drive?"
+            alert.informativeText = "iCloud Drive › CHANNEL already has an archive, probably from your other Mac. CHANNEL will use it from now on. The folder on this Mac is left as it is."
+            alert.addButton(withTitle: "Use iCloud Archive")
+        } else {
+            alert.messageText = "Move your archive to iCloud Drive?"
+            alert.informativeText = "archive.db and assets/ are copied from \(localFolder?.path ?? "your archive folder") to iCloud Drive › CHANNEL, and CHANNEL uses that copy from now on. The originals stay where they are. Uploading can take a while."
+            alert.addButton(withTitle: "Move to iCloud")
+        }
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        useICloud = true
+        NSApp.mainMenu = makeMenu()
+        server?.stop()
+        server = nil
+        showStatus(joining ? "Opening the iCloud archive…" : "Copying to iCloud Drive…")
+        startICloud()
     }
 
     // Closing the window leaves the menu bar tray running.
@@ -405,7 +486,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         work.async {
             do {
                 let server = try Server(database: folder.appendingPathComponent("archive.db"),
-                                        assets: folder.appendingPathComponent("assets"))
+                                        assets: folder.appendingPathComponent("assets"),
+                                        thumbs: folder.appendingPathComponent("thumbs"))
                 try server.waitUntilReady()
                 DispatchQueue.main.async {
                     self.server = server
@@ -444,7 +526,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func askForExistingArchive() {
         let alert = NSAlert()
         alert.messageText = "Move your archive to iCloud Drive"
-        alert.informativeText = "Choose the folder that contains archive.db and assets/. They are copied to iCloud Drive › ArenaArchive, and the originals stay where they are."
+        alert.informativeText = "Choose the folder that contains archive.db and assets/. They are copied to iCloud Drive › CHANNEL, and the originals stay where they are."
         alert.addButton(withTitle: "Choose Folder…")
         alert.addButton(withTitle: "Quit")
         guard alert.runModal() == .alertFirstButtonReturn else { return NSApp.terminate(nil) }
@@ -452,11 +534,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.prompt = "Copy to iCloud"
+        panel.directoryURL = localFolder
         guard panel.runModal() == .OK, let folder = panel.url else { return askForExistingArchive() }
         guard fm.fileExists(atPath: folder.appendingPathComponent("archive.db").path) else {
             showAlert("No archive.db in that folder", "Pick the folder where you ran the importer.")
             return askForExistingArchive()
         }
+        migrate(from: folder)
+    }
+
+    func migrate(from folder: URL) {
         work.async {
             do {
                 try Sync.migrate(from: folder) { message in DispatchQueue.main.async { self.status.stringValue = message } }
@@ -512,11 +599,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 self.downloadAssets()
                 let server = try Server(database: database, readOnly: readOnly)
                 try server.waitUntilReady()
+                let newer = publishVersionAndFindNewer()
                 DispatchQueue.main.async {
                     self.server = server
                     self.showWebView()
                     if !readOnly { self.startSyncTimer() }
-                    if let message { self.showAlert("Sync conflict", message) }
+                    if let message {
+                        self.showAlert("Sync conflict", message)
+                    } else if let newer {
+                        self.showUpdateNotice(newer)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async { self.fail("Could not open the archive", error.localizedDescription) }
@@ -532,6 +624,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             while let file = files?.nextObject() as? URL {
                 try? fm.startDownloadingUbiquitousItem(at: file)
             }
+        }
+    }
+
+    // MARK: Updates
+
+    func showUpdateNotice(_ newer: VersionRecord) {
+        let alert = NSAlert()
+        alert.messageText = "“\(newer.machineName)” has a newer CHANNEL"
+        alert.informativeText = "That Mac runs build \(newer.build) (\(newer.commit)). This one runs build \(AppVersion.build) (\(AppVersion.commit)). Update to keep both Macs in step. If the newer build isn't pushed to GitHub yet, push it from that Mac first."
+        alert.addButton(withTitle: "Update Now")
+        alert.addButton(withTitle: "Later")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn { self?.runUpdate() }
+        }
+    }
+
+    @objc func confirmUpdate() {
+        let alert = NSAlert()
+        alert.messageText = "Update CHANNEL?"
+        alert.informativeText = "CHANNEL quits, pulls the latest version from GitHub, rebuilds and reopens. Terminal shows the progress. This Mac runs build \(AppVersion.build) (\(AppVersion.commit))."
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn { self?.runUpdate() }
+        }
+    }
+
+    /// Runs mac/update.sh in Terminal. The script quits this app first, so the
+    /// archive is written back to iCloud before the new build replaces it.
+    func runUpdate() {
+        guard let script = AppVersion.updateScript else {
+            let path = AppVersion.sourcePath?.path ?? "the project folder"
+            return showAlert("Can't find the update script", "Expected mac/update.sh in \(path). Clone the repo there, or run ./mac/update.sh from wherever it lives.")
+        }
+        let terminal = Process()
+        terminal.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        terminal.arguments = ["-a", "Terminal", script.path]
+        do {
+            try terminal.run()
+        } catch {
+            showAlert("Could not start the update", error.localizedDescription)
         }
     }
 
@@ -557,7 +690,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 if case .conflict(let name) = try Sync.pushIfChanged() {
                     DispatchQueue.main.async {
                         self.switchToReadOnly()
-                        self.showAlert("The archive changed on another Mac", "Your latest changes were saved as “\(name)” in iCloud Drive › ArenaArchive. Quit and reopen to load the newest version.")
+                        self.showAlert("The archive changed on another Mac", "Your latest changes were saved as “\(name)” in iCloud Drive › CHANNEL. Quit and reopen to load the newest version.")
                     }
                 }
             } catch {
@@ -603,15 +736,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         status.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         status.textColor = .secondaryLabelColor
         status.alignment = .center
-        let container = NSView()
         status.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(status)
+        statusView.addSubview(status)
         NSLayoutConstraint.activate([
-            status.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            status.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            status.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor, constant: -40),
+            status.centerXAnchor.constraint(equalTo: statusView.centerXAnchor),
+            status.centerYAnchor.constraint(equalTo: statusView.centerYAnchor),
+            status.widthAnchor.constraint(lessThanOrEqualTo: statusView.widthAnchor, constant: -40),
         ])
-        window.contentView = container
+        window.contentView = statusView
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func showStatus(_ message: String) {
+        status.stringValue = message
+        window.contentView = statusView
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -812,6 +950,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let main = NSMenu()
         main.addItem(submenu(appName, [
             item("About \(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+            item("Update \(appName)…", #selector(confirmUpdate)),
             .separator(),
             item("Hide \(appName)", #selector(NSApplication.hide(_:)), "h"),
             item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
@@ -821,6 +960,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         main.addItem(submenu("File", [
             item("Show Archive in Finder", #selector(showInFinder)),
             useICloud ? nil : item("Choose Archive Folder…", #selector(chooseLocalFolder), "o"),
+            useICloud ? nil : item("Move Archive to iCloud Drive…", #selector(moveToICloud)),
             .separator(),
             item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
         ]))

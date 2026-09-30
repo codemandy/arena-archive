@@ -22,7 +22,8 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 ROOT = Path(__file__).parent
 DATABASE = Path(os.getenv("ARENA_DATABASE", ROOT / "archive.db"))
 ASSETS = Path(os.getenv("ARENA_ASSETS", ROOT / "assets"))
-THUMBS = ASSETS.parent / "thumbs"
+# A regenerable cache; the Mac app keeps it outside iCloud so it never syncs.
+THUMBS = Path(os.getenv("ARENA_THUMBS", ASSETS.parent / "thumbs"))
 THUMB_EDGE = 800
 THUMB_MIN_BYTES = 250_000
 READ_ONLY = os.getenv("ARENA_READONLY") == "1"

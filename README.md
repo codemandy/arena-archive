@@ -44,30 +44,36 @@ Turn on "Move Files to Trash After Filing" in the tray's ⋯ menu to move
 originals to the Trash instead. Closing the archive window keeps the tray
 running; quit from the ⋯ menu or with ⌘Q.
 
-## Planned: iCloud sync
+### iCloud sync
 
-The goal is to sync the archive between Macs through iCloud Drive, with no
-paid developer account. `mac/ArenaArchive.swift` already has a working
-version, but it's switched off. Turn it on with
-`defaults write studio.oxoy.arena-archive useICloud -bool true`. It works like
-this:
+To share the archive between Macs, choose **File › Move Archive to iCloud
+Drive…**. It copies `archive.db` and `assets/` from your archive folder to
+iCloud Drive › CHANNEL, and the app uses that copy from then on. The originals
+stay where they are. On your other Mac, build and install the app, then choose
+the same menu item. It finds the archive already in iCloud and uses it.
 
-- On first launch, it copies `archive.db` and `assets/` to iCloud Drive ›
-  ArenaArchive.
-- It edits a local copy of the database in
+How it syncs:
+
+- The app edits a local copy of the database in
   `~/Library/Application Support/ArenaArchive` and writes it back to iCloud
   every 20 seconds, before sleep, and on quit. SQLite files can't safely be
-  live-synced.
+  synced while they're open.
+- Assets are read from and written to iCloud directly. Thumbnails are a local
+  cache in the same Application Support folder, so they don't sync.
 - `lock.json` in the iCloud folder shows which Mac has the archive open. The
   other Mac can take over or open it read-only.
 - If both Macs changed the database while out of sync, the local changes are
-  saved as `archive conflict <Mac> <date>.db`.
+  saved as `archive conflict <Mac> <date>.db` next to it. Nothing is
+  overwritten.
 
-Before relying on it:
+Wait for iCloud to finish syncing before opening the app on the other Mac.
+To import into the synced archive, quit the app first and point the importer
+at the iCloud folder:
 
-- Test it on two real Macs.
-- Decide how assets evicted by "Optimize Mac Storage" should behave.
-- Add a way to run the importer against the synced folder.
+```bash
+cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/CHANNEL
+python3 /path/to/arena_archive.py import maus-cats --database archive.db --assets assets
+```
 
 ## Importer
 

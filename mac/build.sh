@@ -3,6 +3,7 @@
 #
 #   ./mac/build.sh            build into build.noindex/
 #   ./mac/build.sh --install  build and copy to ~/Applications
+#   ./mac/update.sh           pull, rebuild, install and reopen
 set -euo pipefail
 
 ROOT=${0:A:h:h}
@@ -35,6 +36,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)</string>
+  <!-- Read by the app to compare versions between Macs and to run mac/update.sh. -->
+  <key>CHANNELCommit</key><string>$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)</string>
+  <key>CHANNELSourcePath</key><string>$ROOT</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHighResolutionCapable</key><true/>
