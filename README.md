@@ -24,6 +24,23 @@ On first launch, choose the folder that has `archive.db` and `assets/` (for
 example this project folder). The app reads and writes those files in place
 and remembers the folder. Use File › Choose Archive Folder… (⌘O) to switch.
 
+### Updating
+
+Push changes from the Mac where you made them. Then, on each other Mac,
+choose **CHANNEL › Update CHANNEL…**, or run:
+
+```bash
+./mac/update.sh
+```
+
+It pulls from GitHub, quits CHANNEL (which writes the archive back to iCloud),
+rebuilds, reinstalls and reopens it. It stops if the project folder has
+uncommitted changes.
+
+In iCloud mode, each Mac records its build in iCloud Drive › CHANNEL ›
+versions. When you open CHANNEL on a Mac with an older build than your other
+Mac, it tells you and offers to update.
+
 ### Menu bar tray
 
 The app puts a tray icon in the menu bar. Drag anything onto it: files from
