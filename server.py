@@ -28,7 +28,7 @@ THUMB_EDGE = 800
 THUMB_MIN_BYTES = 250_000
 READ_ONLY = os.getenv("ARENA_READONLY") == "1"
 # How a channel lays out its blocks; the first is the default.
-BLOCK_VIEWS = ("large", "small", "stack")
+BLOCK_VIEWS = ("large", "small", "stack", "abc")
 
 
 def esc(value: object) -> str:
@@ -594,15 +594,18 @@ document.addEventListener('drop', async (event) => {{
     if (response.ok) window.location.reload(); else alert('Could not add the block.');
   }}
 }});
-// A channel shows its blocks large, small or stacked. A cookie remembers the choice,
+// A channel shows its blocks large, small, stacked or A–Z. A cookie remembers the choice,
 // so the server renders the page that way next time.
 const blockGrid = document.querySelector('.block-grid[data-view]');
 document.querySelectorAll('[data-view-option]').forEach((button, index, buttons) => {{
   button.addEventListener('click', () => {{
     const view = button.dataset.viewOption;
+    const reorder = (view === 'abc') !== (blockGrid.dataset.view === 'abc');
+    document.cookie = `block_view=${{view}}; path=/; max-age=31536000; SameSite=Lax`;
+    // The server sorts the blocks, so going into or out of A–Z reloads the page.
+    if (reorder) {{ window.location.reload(); return; }}
     blockGrid.dataset.view = view;
     buttons.forEach((other) => other.setAttribute('aria-pressed', String(other === button)));
-    document.cookie = `block_view=${{view}}; path=/; max-age=31536000; SameSite=Lax`;
   }});
 }});
 const liveSearch = document.getElementById('archive-search');
@@ -866,6 +869,28 @@ def block_card(row: sqlite3.Row) -> str:
         remove = f"<form class='block-remove' method='post' action='/remove-block'><input type='hidden' name='channel_id' value='{row['parent_channel_id']}'><input type='hidden' name='block_id' value='{row['id']}'><button type='submit'>REMOVE</button></form>"
         draggable = f" draggable='true' data-draggable-block data-select-id='{row['id']}'"
     return f"<article class='block' data-type='{esc(row['type'])}' data-block-id='{row['id']}'{source_attribute}{download}{draggable}><div class='block-visual'>{visual}{remove}</div><div class='block-meta'><span>{kind}</span><span>{esc(row['author_name'])}</span>{source}</div><h3>{title_markup(row['title'])}</h3>{note_markup}</article>"
+
+
+def abc_grid(blocks: list[sqlite3.Row]) -> str:
+    """Blocks sorted by name under a heading for each first letter; untitled ones go last."""
+    def name(row: sqlite3.Row) -> str:
+        return (row["title"] or "").strip()
+
+    # Numbers compare as numbers, so "img 2" comes before "img 10".
+    def key(row: sqlite3.Row) -> list[object]:
+        return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name(row).casefold())]
+
+    rows = sorted((row for row in blocks if name(row)), key=key) + [row for row in blocks if not name(row)]
+    parts: list[str] = []
+    heading = None
+    for row in rows:
+        title = name(row)
+        letter = (title[0].upper() if title[0].isalpha() else "#") if title else "UNTITLED"
+        if letter != heading:
+            heading = letter
+            parts.append(f"<h2 class='letter-heading'>{esc(letter)}</h2>")
+        parts.append(block_card(row))
+    return "".join(parts)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1373,11 +1398,11 @@ class Handler(BaseHTTPRequestHandler):
         categories = connection.execute("SELECT name FROM categories ORDER BY lower(name)").fetchall()
         targets = connection.execute("SELECT id, title, category FROM channels WHERE id != ? ORDER BY lower(title)", (channel_id,)).fetchall()
         connection.close()
-        grid = "".join(block_card(row) for row in blocks)
-        empty = '<div class="notice">No imported blocks in this channel.</div>'
         block_view = self.cookie("block_view")
         if block_view not in BLOCK_VIEWS:
             block_view = BLOCK_VIEWS[0]
+        grid = abc_grid(blocks) if block_view == "abc" else "".join(block_card(row) for row in blocks)
+        empty = '<div class="notice">No imported blocks in this channel.</div>'
         view_switch = "<div class='view-switch' role='group' aria-label='Block view'><span class='view-label'>VIEW</span>" + "".join(f"<button type='button' data-view-option='{view}' aria-pressed='{'true' if view == block_view else 'false'}'>{view.upper()}</button>" for view in BLOCK_VIEWS) + "</div>"
         category_options = "<option value=''>Uncategorized</option>" + "".join(f"<option value='{esc(row['name'])}'{' selected' if row['name'] == channel['category'] else ''}>{esc(row['name'])}</option>" for row in categories)
         target_cards = "".join(f"<div class='drop-channel' data-drop-channel='{row['id']}'><span>{esc(row['category'] or 'UNCATEGORIZED').upper()}</span><strong>{title_markup(row['title'])}</strong></div>" for row in targets)

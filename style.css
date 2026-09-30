@@ -85,22 +85,27 @@ body.page-drop::after { content: 'DROP TO ADD TO THIS CHANNEL'; position: fixed;
 .block-grid[data-view="small"] .block-note { font-size: 11px; }
 .block-grid[data-view="small"] .block-remove { top: 6px; right: 6px; }
 
-/* Stack: small rectangles with a thumbnail and the name. */
-.block-grid[data-view="stack"] { columns: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 6px; }
-.block-grid[data-view="stack"] .block { display: grid; grid-template-columns: 52px minmax(0, 1fr); grid-template-rows: 1fr 1fr; column-gap: 12px; margin: 0; padding: 6px; border: 1px solid var(--line); background: var(--paper); }
-.block-grid[data-view="stack"] .block:hover { border-color: var(--ink); }
-.block-grid[data-view="stack"] .block-visual { grid-row: 1 / 3; width: 52px; height: 52px; min-height: 0; }
-.block-grid[data-view="stack"] .block-visual img { width: 100%; height: 100%; object-fit: cover; }
-.block-grid[data-view="stack"] .text-block { height: 100%; padding: 5px; font-size: 6px; line-height: 1.3; overflow: hidden; }
-.block-grid[data-view="stack"] .empty-block, .block-grid[data-view="stack"] .channel-block, .block-grid[data-view="stack"] .download-block { height: 100%; min-height: 0; padding: 0; font-size: 0; }
-.block-grid[data-view="stack"] .empty-block > *, .block-grid[data-view="stack"] .channel-block > *, .block-grid[data-view="stack"] .download-block > strong { display: none; }
-.block-grid[data-view="stack"] h3 { grid-column: 2; grid-row: 1; align-self: end; font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; overflow-wrap: normal; }
-.block-grid[data-view="stack"] h3:empty::before { content: "Untitled"; color: var(--muted); }
-.block-grid[data-view="stack"] .block-meta { grid-column: 2; grid-row: 2; align-self: start; padding: 4px 0 0; overflow: hidden; white-space: nowrap; }
-.block-grid[data-view="stack"] .block-meta > :not(:first-child), .block-grid[data-view="stack"] .block-note, .block-grid[data-view="stack"] .block-remove { display: none; }
-.selecting .block-grid[data-view="stack"] .block-visual::after { top: 4px; left: 4px; width: 16px; height: 16px; font-size: 10px; }
-.block-grid[data-view="stack"] .block.is-selected { border-color: var(--ink); background: var(--accent); }
-@media (max-width: 600px) { .block-grid[data-view="small"] { columns: 3 100px; column-gap: 8px; } .block-grid[data-view="stack"] { grid-template-columns: 1fr; } }
+/* Stack: small rectangles with a thumbnail and the name. ABC uses the same cards, sorted by name. */
+.block-grid:is([data-view="stack"], [data-view="abc"]) { columns: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 6px; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) .block { display: grid; grid-template-columns: 52px minmax(0, 1fr); grid-template-rows: 1fr 1fr; column-gap: 12px; margin: 0; padding: 6px; border: 1px solid var(--line); background: var(--paper); }
+.block-grid:is([data-view="stack"], [data-view="abc"]) .block:hover { border-color: var(--ink); }
+.block-grid:is([data-view="stack"], [data-view="abc"]) .block-visual { grid-row: 1 / 3; width: 52px; height: 52px; min-height: 0; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) .block-visual img { width: 100%; height: 100%; object-fit: cover; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) .text-block { height: 100%; padding: 5px; font-size: 6px; line-height: 1.3; overflow: hidden; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) :is(.empty-block, .channel-block, .download-block) { height: 100%; min-height: 0; padding: 0; font-size: 0; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) :is(.empty-block > *, .channel-block > *, .download-block > strong) { display: none; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) h3 { grid-column: 2; grid-row: 1; align-self: end; font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; overflow-wrap: normal; }
+/* The break points after underscores would still wrap a one-line name. */
+.block-grid:is([data-view="stack"], [data-view="abc"]) h3 wbr { display: none; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) h3:empty::before { content: "Untitled"; color: var(--muted); }
+.block-grid:is([data-view="stack"], [data-view="abc"]) .block-meta { grid-column: 2; grid-row: 2; align-self: start; padding: 4px 0 0; overflow: hidden; white-space: nowrap; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) :is(.block-meta > :not(:first-child), .block-note, .block-remove) { display: none; }
+.selecting .block-grid:is([data-view="stack"], [data-view="abc"]) .block-visual::after { top: 4px; left: 4px; width: 16px; height: 16px; font-size: 10px; }
+.block-grid:is([data-view="stack"], [data-view="abc"]) .block.is-selected { border-color: var(--ink); background: var(--accent); }
+/* ABC: a heading across the row for each first letter. */
+.letter-heading { grid-column: 1 / -1; margin: 22px 0 4px; padding-bottom: 6px; border-bottom: 1px solid var(--ink); font: 700 18px Arial, Helvetica, sans-serif; letter-spacing: -.02em; }
+.letter-heading:first-child { margin-top: 0; }
+@media (max-width: 600px) { .block-grid[data-view="small"] { columns: 3 100px; column-gap: 8px; } .block-grid:is([data-view="stack"], [data-view="abc"]) { grid-template-columns: 1fr; } }
 .update-button { border: 1px solid var(--line); background: transparent; color: var(--muted); padding: 5px 8px; margin: -6px 0; font: 10px monospace; letter-spacing: .1em; cursor: pointer; }.update-button:hover { border-color: var(--ink); color: var(--ink); }.update-button[data-state="available"] { background: var(--accent); border-color: var(--ink); color: var(--ink); }.update-button[data-state="available"]:hover { background: var(--ink); color: var(--accent); }.update-button[data-state="checking"], .update-button[data-state="updating"] { cursor: default; }.update-button[data-state="error"] { border-style: dashed; }
 
 /* Selecting blocks and channels for batch actions */
