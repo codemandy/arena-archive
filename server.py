@@ -27,6 +27,8 @@ THUMBS = Path(os.getenv("ARENA_THUMBS", ASSETS.parent / "thumbs"))
 THUMB_EDGE = 800
 THUMB_MIN_BYTES = 250_000
 READ_ONLY = os.getenv("ARENA_READONLY") == "1"
+# How a channel lays out its blocks; the first is the default.
+BLOCK_VIEWS = ("large", "small", "stack")
 
 
 def esc(value: object) -> str:
@@ -35,6 +37,232 @@ def esc(value: object) -> str:
 
 def title_markup(value: object) -> str:
     return esc(value).replace("_", "_<wbr>")
+
+
+# Select blocks in a channel, or channels on the main page, and act on them together.
+# Click SELECT (or ⌘-click / shift-click an item) to start. A plain string, so no doubled braces.
+SELECTION_SCRIPT = r"""<script>
+(() => {
+  const bar = document.getElementById('selection-bar');
+  const grid = document.querySelector('[data-select-kind]');
+  if (!bar || !grid) return;
+  const kind = grid.dataset.selectKind;
+  const channelId = kind === 'blocks' ? grid.dataset.dropChannel : '';
+  const toggle = document.querySelector('[data-select-toggle]');
+  const count = document.getElementById('selection-count');
+  const selectAllButton = bar.querySelector('[data-batch="all"]');
+  const dialog = document.getElementById('batch-dialog');
+  const form = document.getElementById('batch-form');
+  const selected = new Set();
+  let selecting = false;
+  let anchor = null;
+  let run = null;
+  const allItems = () => [...grid.querySelectorAll('[data-select-id]')];
+  const visibleItems = () => allItems().filter((item) => item.offsetParent !== null);
+  const selectedIds = () => allItems().map((item) => item.dataset.selectId).filter((id) => selected.has(id));
+  const noun = (n) => `${n} ${kind === 'blocks' ? (n === 1 ? 'block' : 'blocks') : (n === 1 ? 'channel' : 'channels')}`;
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const nameOf = (id) => grid.querySelector(`[data-select-id="${CSS.escape(id)}"] :is(h2, h3)`)?.textContent.trim() || '';
+  const render = () => {
+    allItems().forEach((item) => item.classList.toggle('is-selected', selected.has(item.dataset.selectId)));
+    count.textContent = `${selected.size} SELECTED`;
+    bar.querySelectorAll('[data-needs]').forEach((button) => { button.disabled = selected.size < Number(button.dataset.needs); });
+    const visible = visibleItems();
+    selectAllButton.textContent = visible.length && visible.every((item) => selected.has(item.dataset.selectId)) ? 'SELECT NONE' : 'SELECT ALL';
+    bar.hidden = !selecting;
+    document.body.classList.toggle('selecting', selecting);
+    if (toggle) {
+      toggle.setAttribute('aria-pressed', String(selecting));
+      toggle.textContent = selecting ? 'DONE SELECTING' : `SELECT ${kind.toUpperCase()}`;
+    }
+  };
+  const setSelecting = (on) => {
+    selecting = on;
+    if (!on) { selected.clear(); anchor = null; }
+    render();
+  };
+  const selectAll = () => {
+    const visible = visibleItems();
+    const all = visible.every((item) => selected.has(item.dataset.selectId));
+    visible.forEach((item) => all ? selected.delete(item.dataset.selectId) : selected.add(item.dataset.selectId));
+    render();
+  };
+  if (toggle) toggle.addEventListener('click', () => setSelecting(!selecting));
+  // Captured before the page's own click handling, so a selecting click never opens a block or channel.
+  document.addEventListener('click', (event) => {
+    const item = event.target.closest('[data-select-id]');
+    if (!item || !grid.contains(item) || !modal.hidden) return;
+    if (!selecting && !event.metaKey && !event.shiftKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const id = item.dataset.selectId;
+    const visible = visibleItems();
+    const from = visible.findIndex((other) => other.dataset.selectId === anchor);
+    if (event.shiftKey && from >= 0) {
+      const to = visible.indexOf(item);
+      visible.slice(Math.min(from, to), Math.max(from, to) + 1).forEach((other) => selected.add(other.dataset.selectId));
+    } else if (selected.has(id)) {
+      selected.delete(id);
+    } else {
+      selected.add(id);
+    }
+    anchor = id;
+    selecting = true;
+    render();
+  }, true);
+  document.addEventListener('keydown', (event) => {
+    if (!modal.hidden || dialog.open || event.target.closest('input, textarea, select, [contenteditable]')) return;
+    if (selecting && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') { event.preventDefault(); selectAll(); }
+    else if (selecting && event.key === 'Escape') setSelecting(false);
+    else if (selected.size && (event.key === 'Backspace' || event.key === 'Delete')) { event.preventDefault(); openAction('delete'); }
+  });
+  bar.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-batch]');
+    if (!button || button.disabled) return;
+    if (button.dataset.batch === 'done') setSelecting(false);
+    else if (button.dataset.batch === 'all') selectAll();
+    else openAction(button.dataset.batch);
+  });
+
+  const post = async (path, fields) => {
+    const body = new URLSearchParams(fields);
+    for (const id of selectedIds()) body.append(kind === 'blocks' ? 'block_ids' : 'channel_ids', id);
+    if (channelId) body.append('channel_id', channelId);
+    const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    if (!response.ok) {
+      const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+      throw new Error(page.querySelector('.notice p')?.textContent || 'The archive could not be updated.');
+    }
+    return response.json();
+  };
+  // Mirrors batch_titles() in server.py so the preview matches what gets saved.
+  const batchTitles = (title, n, numbered) => {
+    if (!numbered || (n === 1 && !title.includes('#'))) return Array(n).fill(title);
+    const width = String(n).length;
+    return Array.from({ length: n }, (_, index) => {
+      const number = String(index + 1).padStart(width, '0');
+      return title.includes('#') ? title.replaceAll('#', number) : `${title} ${number}`;
+    });
+  };
+  const footer = (label, danger = false) => `<p class='batch-error' hidden></p><div class='batch-actions'><button type='button' data-cancel>CANCEL</button><button type='submit' class='${danger ? 'danger' : ''}'>${esc(label)}</button></div>`;
+  const field = (name) => form.elements.namedItem(name);
+  const checked = (name) => (field(name)?.checked ? '1' : '0');
+
+  const openAction = async (action) => {
+    const ids = selectedIds();
+    const n = ids.length;
+    if (!n) return;
+    const things = noun(n).toUpperCase();
+    if (action === 'rename') {
+      form.innerHTML = `<p class='eyebrow'>RENAME ${things}</p>
+        <label class='batch-field'><span>New name</span><input name='title' required autocomplete='off' value='${esc(nameOf(ids[0]))}'></label>
+        ${n > 1 ? `<label class='batch-check'><input type='checkbox' name='numbered' checked> Number them in order. Put <b>#</b> in the name to place the number.</label>` : ''}
+        <p class='batch-hint' data-preview></p>${footer(`RENAME ${things}`)}`;
+      const preview = () => {
+        const names = batchTitles(field('title').value.trim(), n, field('numbered')?.checked);
+        form.querySelector('[data-preview]').textContent = n > 1 && names[0] ? `→ ${names.length > 3 ? `${names[0]}, ${names[1]} … ${names.at(-1)}` : names.join(', ')}` : '';
+      };
+      form.oninput = preview;
+      preview();
+      run = () => post(kind === 'blocks' ? '/rename-blocks' : '/rename-channels', { title: field('title').value.trim(), numbered: checked('numbered') });
+    } else if (action === 'merge') {
+      form.innerHTML = `<p class='eyebrow'>MERGE ${things}</p>
+        <p class='batch-hint'>Their blocks go into one new channel, in order. Where one of them sits inside another channel, the new channel takes its place.</p>
+        <label class='batch-field'><span>New channel name</span><input name='title' required autocomplete='off' placeholder='Name the merged channel'></label>
+        <label class='batch-check'><input type='checkbox' name='keep'> Keep the original channels</label>${footer('MERGE')}`;
+      run = () => post('/merge-channels', { title: field('title').value.trim(), keep: checked('keep') });
+    } else if (action === 'delete') {
+      const detail = kind === 'blocks'
+        ? 'They are taken out of this channel. A block that is also in another channel stays there; the rest are deleted with their files.'
+        : 'Their blocks are deleted with their files, unless a block is also in another channel.';
+      form.innerHTML = `<p class='eyebrow'>DELETE ${things}</p><p class='batch-question'>Delete ${esc(noun(n))}?</p><p class='batch-hint'>${detail} This can’t be undone.</p>${footer(`DELETE ${things}`, true)}`;
+      run = () => post(kind === 'blocks' ? '/delete-blocks' : '/delete-channels', {});
+    } else if (action === 'move') {
+      await openMove(ids, things);
+    }
+    form.querySelector('.batch-error').hidden = true;
+    if (!dialog.open) dialog.showModal();
+    // Deleting can't be undone, so Return alone never confirms it.
+    (form.querySelector('input:not([type=checkbox])') || form.querySelector(action === 'delete' ? '[data-cancel]' : '[type=submit]')).focus();
+    form.querySelector('input[name=title]')?.select();
+  };
+
+  // Pick an existing channel from the list, or type a name to make a new one.
+  const openMove = async (ids, things) => {
+    const nestNote = kind === 'blocks'
+      ? `<label class='batch-check' data-new-only hidden><input type='checkbox' name='nest' checked> Put the new channel inside this one</label><label class='batch-check'><input type='checkbox' name='keep'> Keep them in this channel too</label>`
+      : `<p class='batch-hint'>They go inside the channel you choose, and stay on the main page too.</p>`;
+    form.innerHTML = `<p class='eyebrow'>MOVE ${things} TO</p>
+      <input class='batch-search' name='search' type='search' autocomplete='off' placeholder='Find a channel, or type a new name' aria-label='Channel'>
+      <div class='batch-targets' role='listbox' aria-label='Channels'></div>${nestNote}${footer('MOVE')}`;
+    let channels = [];
+    try { channels = (await (await fetch('/api/channels')).json()).channels; } catch (error) {}
+    const excluded = new Set(kind === 'blocks' ? [channelId] : ids);
+    channels = channels.filter((channel) => !excluded.has(String(channel.id)));
+    const list = form.querySelector('.batch-targets');
+    const search = field('search');
+    const submit = form.querySelector('[type=submit]');
+    let target = null;
+    const choose = (option) => {
+      list.querySelectorAll('[role=option]').forEach((other) => other.setAttribute('aria-selected', String(other === option)));
+      target = option ? { id: option.dataset.target || '', title: option.dataset.newTitle || '' } : null;
+      form.querySelectorAll('[data-new-only]').forEach((element) => { element.hidden = !(target && target.title); });
+      submit.disabled = !target;
+      submit.textContent = !target ? 'MOVE' : target.title ? `MOVE TO NEW CHANNEL` : `MOVE ${things}`;
+    };
+    const draw = () => {
+      const term = search.value.trim();
+      const lower = term.toLowerCase();
+      const matches = channels.filter((channel) => !lower || channel.title.toLowerCase().includes(lower));
+      const exact = matches.findIndex((channel) => channel.title.toLowerCase() === lower);
+      if (exact > 0) matches.unshift(...matches.splice(exact, 1));
+      const make = term ? `<button type='button' role='option' class='batch-new' data-new-title='${esc(term)}'><span>NEW CHANNEL</span><strong>${esc(term)}</strong></button>` : '';
+      const rows = matches.map((channel) => `<button type='button' role='option' data-target='${channel.id}'><span>${esc((channel.category || 'Uncategorized').toUpperCase())} · ${channel.block_count}</span><strong>${esc(channel.title)}</strong></button>`);
+      list.innerHTML = exact >= 0 ? rows[0] + make + rows.slice(1).join('') : make + rows.join('');
+      if (!list.innerHTML) list.innerHTML = `<p class='batch-hint'>Type a name to make a new channel.</p>`;
+      // Typing finds a channel first; a new one is only picked when nothing matches.
+      choose(term ? list.querySelector('[data-target]') || list.querySelector('[role=option]') : null);
+    };
+    search.addEventListener('input', draw);
+    search.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      event.preventDefault();
+      const options = [...list.querySelectorAll('[role=option]')];
+      const index = options.findIndex((option) => option.getAttribute('aria-selected') === 'true');
+      const next = options[Math.max(0, Math.min(options.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))];
+      if (next) { choose(next); next.scrollIntoView({ block: 'nearest' }); }
+    });
+    list.addEventListener('click', (event) => { const option = event.target.closest('[role=option]'); if (option) choose(option); });
+    list.addEventListener('dblclick', (event) => { if (event.target.closest('[role=option]')) form.requestSubmit(); });
+    draw();
+    run = () => {
+      if (!target) throw new Error('Choose a channel first.');
+      const fields = target.title ? { new_title: target.title } : { target_id: target.id };
+      if (kind === 'blocks') Object.assign(fields, { nest: checked('nest'), keep: checked('keep') });
+      return post(kind === 'blocks' ? '/move-blocks' : '/move-channels', fields);
+    };
+  };
+
+  form.addEventListener('click', (event) => { if (event.target.closest('[data-cancel]')) dialog.close(); });
+  dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+  dialog.addEventListener('close', () => { form.oninput = null; form.replaceChildren(); run = null; });
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submit = form.querySelector('[type=submit]');
+    const message = form.querySelector('.batch-error');
+    submit.disabled = true;
+    try {
+      await run();
+      window.location.reload();
+    } catch (error) {
+      message.textContent = error.message;
+      message.hidden = false;
+      submit.disabled = false;
+    }
+  });
+  render();
+})();
+</script>"""
 
 
 def layout(title: str, body: str) -> str:
@@ -366,6 +594,17 @@ document.addEventListener('drop', async (event) => {{
     if (response.ok) window.location.reload(); else alert('Could not add the block.');
   }}
 }});
+// A channel shows its blocks large, small or stacked. A cookie remembers the choice,
+// so the server renders the page that way next time.
+const blockGrid = document.querySelector('.block-grid[data-view]');
+document.querySelectorAll('[data-view-option]').forEach((button, index, buttons) => {{
+  button.addEventListener('click', () => {{
+    const view = button.dataset.viewOption;
+    blockGrid.dataset.view = view;
+    buttons.forEach((other) => other.setAttribute('aria-pressed', String(other === button)));
+    document.cookie = `block_view=${{view}}; path=/; max-age=31536000; SameSite=Lax`;
+  }});
+}});
 const liveSearch = document.getElementById('archive-search');
 const channelCount = document.getElementById('channel-count');
 if (liveSearch) {{
@@ -382,7 +621,7 @@ if (liveSearch) {{
     if (channelCount) channelCount.textContent = `${{visible}} of ${{total}} channels`;
   }});
 }}
-</script></body></html>"""
+</script>{SELECTION_SCRIPT}</body></html>"""
 
 
 def db():
@@ -419,8 +658,131 @@ def cleanup_block(connection: sqlite3.Connection, block_id: int) -> None:
     connection.execute("DELETE FROM blocks WHERE id = ?", (block_id,))
 
 
+def timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def insert_channel(connection: sqlite3.Connection, title: str, category: str = "", description: str = "", visibility: str = "private") -> int:
+    channel_id = local_id(connection, "channels")
+    now = timestamp()
+    connection.execute("INSERT INTO channels (id, slug, title, description, visibility, category, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (channel_id, f"local-{abs(channel_id)}", title, description, visibility, category, now, now, json.dumps({"local": True})))
+    if category:
+        connection.execute("INSERT OR IGNORE INTO categories(name) VALUES (?)", (category,))
+    return channel_id
+
+
+def require_channel(connection: sqlite3.Connection, channel_id: int) -> sqlite3.Row:
+    channel = connection.execute("SELECT * FROM channels WHERE id = ?", (channel_id,)).fetchone()
+    if not channel:
+        raise ValueError("channel not found")
+    return channel
+
+
+def append_block(connection: sqlite3.Connection, channel_id: int, block_id: int, position: int | None = None) -> None:
+    if position is None:
+        position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
+    now = timestamp()
+    connection.execute("INSERT OR IGNORE INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, json.dumps({"local": True, "connected_at": now})))
+
+
+def channel_block(connection: sqlite3.Connection, channel_id: int) -> int:
+    """The 'channel' block that links to a channel page, made on first use."""
+    existing = connection.execute("SELECT id FROM blocks WHERE type = 'channel' AND source_url = ?", (f"/channel/{channel_id}",)).fetchone()
+    if existing:
+        return existing["id"]
+    channel = require_channel(connection, channel_id)
+    block_id = local_id(connection, "blocks")
+    now = timestamp()
+    connection.execute("INSERT INTO blocks (id, type, title, content, description, author_name, author_slug, source_url, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "channel", channel["title"] or channel["slug"], "", "", "Local archive", "local", f"/channel/{channel_id}", now, now, json.dumps({"local": True, "channel_id": channel_id})))
+    return block_id
+
+
+def linked_channel(connection: sqlite3.Connection, block_id: int) -> int | None:
+    """The channel a 'channel' block points to, if it is one."""
+    row = connection.execute("SELECT source_url FROM blocks WHERE id = ? AND type = 'channel'", (block_id,)).fetchone()
+    match = re.fullmatch(r"/channel/(-?\d+)", row["source_url"] or "") if row else None
+    return int(match.group(1)) if match else None
+
+
+def set_channel_title(connection: sqlite3.Connection, channel_id: int, title: str) -> None:
+    connection.execute("UPDATE channels SET title = ?, updated_at = ? WHERE id = ?", (title, timestamp(), channel_id))
+    connection.execute("UPDATE blocks SET title = ? WHERE type = 'channel' AND source_url = ?", (title, f"/channel/{channel_id}"))
+
+
+def set_block_title(connection: sqlite3.Connection, block_id: int, title: str) -> None:
+    if not connection.execute("SELECT 1 FROM blocks WHERE id = ?", (block_id,)).fetchone():
+        raise ValueError("block not found")
+    # A nested channel's name is the channel's name, so renaming one renames both.
+    channel_id = linked_channel(connection, block_id)
+    if channel_id is not None and title and connection.execute("SELECT 1 FROM channels WHERE id = ?", (channel_id,)).fetchone():
+        set_channel_title(connection, channel_id, title)
+    connection.execute("UPDATE blocks SET title = ? WHERE id = ?", (title, block_id))
+
+
+def delete_channel_rows(connection: sqlite3.Connection, channel_id: int) -> None:
+    block_ids = [row[0] for row in connection.execute("SELECT block_id FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchall()]
+    nested = [row[0] for row in connection.execute("SELECT id FROM blocks WHERE type = 'channel' AND source_url = ?", (f"/channel/{channel_id}",)).fetchall()]
+    connection.execute("DELETE FROM channel_blocks WHERE channel_id = ?", (channel_id,))
+    connection.executemany("DELETE FROM channel_blocks WHERE block_id = ?", [(block_id,) for block_id in nested])
+    connection.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
+    for block_id in block_ids + nested:
+        cleanup_block(connection, block_id)
+
+
+def merge_channel_rows(connection: sqlite3.Connection, channel_ids: list[int], title: str, keep: bool) -> int:
+    """Put every block of the channels into one new channel, in order, without duplicates."""
+    sources = [require_channel(connection, channel_id) for channel_id in channel_ids]
+    merged_id = insert_channel(connection, title, sources[0]["category"], next((row["description"] for row in sources if row["description"]), ""))
+    if any(row["favorite"] for row in sources):
+        connection.execute("UPDATE channels SET favorite = 1 WHERE id = ?", (merged_id,))
+    position = 0
+    for channel_id in channel_ids:
+        for row in connection.execute("SELECT block_id FROM channel_blocks WHERE channel_id = ? ORDER BY position", (channel_id,)).fetchall():
+            # A merged channel that contained another one would otherwise contain itself.
+            if linked_channel(connection, row["block_id"]) in channel_ids:
+                continue
+            append_block(connection, merged_id, row["block_id"], position)
+            position += 1
+    if keep:
+        return merged_id
+    # Wherever an old channel was nested, nest the merged channel instead.
+    placeholders = ",".join("?" * len(channel_ids))
+    links = [row[0] for row in connection.execute(f"SELECT id FROM blocks WHERE type = 'channel' AND source_url IN ({placeholders})", [f"/channel/{channel_id}" for channel_id in channel_ids]).fetchall()]
+    if links:
+        link_marks = ",".join("?" * len(links))
+        parents = connection.execute(f"SELECT channel_id, MIN(position) AS position FROM channel_blocks WHERE block_id IN ({link_marks}) AND channel_id NOT IN ({placeholders}) GROUP BY channel_id", links + channel_ids).fetchall()
+        merged_link = channel_block(connection, merged_id)
+        for parent in parents:
+            append_block(connection, parent["channel_id"], merged_link, parent["position"])
+    for channel_id in channel_ids:
+        delete_channel_rows(connection, channel_id)
+    return merged_id
+
+
 def form_value(values: dict[str, list[str]], key: str) -> str:
     return values.get(key, [""])[0].strip()
+
+
+def form_ids(values: dict[str, list[str]], key: str) -> list[int]:
+    ids: list[int] = []
+    for value in values.get(key, []):
+        for part in value.split(","):
+            if part.strip() and int(part) not in ids:
+                ids.append(int(part))
+    if not ids:
+        raise ValueError("nothing selected")
+    return ids
+
+
+def batch_titles(title: str, count: int, numbered: bool) -> list[str]:
+    """One name per item. Numbers replace '#' in the name, or are added at the end."""
+    title = title.strip()[:300]
+    if not title:
+        raise ValueError("name cannot be empty")
+    if not numbered or (count == 1 and "#" not in title):
+        return [title] * count
+    width = len(str(count))
+    return [title.replace("#", str(index).zfill(width)) if "#" in title else f"{title} {str(index).zfill(width)}" for index in range(1, count + 1)]
 
 
 def preview(source: Path) -> Path | None:
@@ -460,6 +822,20 @@ def thumbnail(source: Path, content_type: str) -> Path:
     return target
 
 
+def select_button(kind: str) -> str:
+    if READ_ONLY:
+        return ""
+    return f"<button class='select-button' type='button' data-select-toggle aria-pressed='false'>SELECT {kind.upper()}</button>"
+
+
+def selection_bar(kind: str) -> str:
+    """Batch actions for the selected blocks or channels; the script fills in the count."""
+    if READ_ONLY:
+        return ""
+    merge = "<button type='button' data-batch='merge' data-needs='2'>MERGE</button>" if kind == "channels" else ""
+    return f"<div class='selection-bar' id='selection-bar' data-kind='{kind}' hidden><span class='selection-count' id='selection-count' aria-live='polite'>0 SELECTED</span><button type='button' data-batch='all'>SELECT ALL</button><button type='button' data-batch='rename' data-needs='1'>RENAME</button><button type='button' data-batch='move' data-needs='1'>MOVE TO…</button>{merge}<button type='button' class='danger' data-batch='delete' data-needs='1'>DELETE</button><button type='button' data-batch='done'>DONE</button></div><dialog class='batch-dialog' id='batch-dialog'><form id='batch-form' method='dialog'></form></dialog>"
+
+
 def block_card(row: sqlite3.Row) -> str:
     asset = row["asset_path"]
     kind = esc(row["type"]).upper()
@@ -488,7 +864,7 @@ def block_card(row: sqlite3.Row) -> str:
     draggable = ""
     if "parent_channel_id" in row.keys():
         remove = f"<form class='block-remove' method='post' action='/remove-block'><input type='hidden' name='channel_id' value='{row['parent_channel_id']}'><input type='hidden' name='block_id' value='{row['id']}'><button type='submit'>REMOVE</button></form>"
-        draggable = " draggable='true' data-draggable-block"
+        draggable = f" draggable='true' data-draggable-block data-select-id='{row['id']}'"
     return f"<article class='block' data-type='{esc(row['type'])}' data-block-id='{row['id']}'{source_attribute}{download}{draggable}><div class='block-visual'>{visual}{remove}</div><div class='block-meta'><span>{kind}</span><span>{esc(row['author_name'])}</span>{source}</div><h3>{title_markup(row['title'])}</h3>{note_markup}</article>"
 
 
@@ -601,15 +977,44 @@ class Handler(BaseHTTPRequestHandler):
                 self.set_note(values)
             elif self.path == "/toggle-favorite":
                 self.toggle_favorite(values)
+            elif self.path == "/rename-blocks":
+                self.rename_blocks(values)
+            elif self.path == "/move-blocks":
+                self.move_blocks(values)
+            elif self.path == "/delete-blocks":
+                self.delete_blocks(values)
+            elif self.path == "/rename-channels":
+                self.rename_channels(values)
+            elif self.path == "/move-channels":
+                self.move_channels(values)
+            elif self.path == "/merge-channels":
+                self.merge_channels(values)
+            elif self.path == "/delete-channels":
+                self.delete_channels(values)
             else:
                 self.send_error(404)
         except (sqlite3.Error, ValueError, OSError) as error:
             self.send_html(layout("Archive error", f"<section class='notice'><h1>Could not update archive</h1><p>{esc(error)}</p></section>"), 400)
 
+    def cookie(self, name: str) -> str:
+        for part in self.headers.get("Cookie", "").split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == name:
+                return unquote(value)
+        return ""
+
     def redirect(self, location: str) -> None:
         self.send_response(303)
         self.send_header("Location", location)
         self.end_headers()
+
+    def send_json(self, value: object) -> None:
+        data = json.dumps(value).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def create_channel(self, values: dict[str, list[str]]) -> None:
         title = form_value(values, "title") or "Untitled channel"
@@ -618,12 +1023,7 @@ class Handler(BaseHTTPRequestHandler):
         if visibility not in {"public", "closed", "private"}:
             visibility = "private"
         connection = db()
-        channel_id = local_id(connection, "channels")
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        category = form_value(values, "category")
-        connection.execute("INSERT INTO channels (id, slug, title, description, visibility, category, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (channel_id, f"local-{abs(channel_id)}", title, description, visibility, category, now, now, json.dumps({"local": True})))
-        if category:
-            connection.execute("INSERT OR IGNORE INTO categories(name) VALUES (?)", (category,))
+        channel_id = insert_channel(connection, title, form_value(values, "category"), description, visibility)
         connection.commit()
         connection.close()
         self.redirect(f"/channel/{channel_id}")
@@ -645,8 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
         if not title:
             raise ValueError("channel name cannot be empty")
         connection = db()
-        connection.execute("UPDATE channels SET title = ?, updated_at = ? WHERE id = ?", (title, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), channel_id))
-        connection.execute("UPDATE blocks SET title = ? WHERE type = 'channel' AND source_url = ?", (title, f"/channel/{channel_id}"))
+        set_channel_title(connection, channel_id, title)
         connection.commit()
         connection.close()
         self.redirect(f"/channel/{channel_id}")
@@ -695,9 +1094,7 @@ class Handler(BaseHTTPRequestHandler):
         block_id = int(form_value(values, "block_id"))
         title = form_value(values, "title")[:300]
         connection = db()
-        if not connection.execute("SELECT 1 FROM blocks WHERE id = ?", (block_id,)).fetchone():
-            raise ValueError("block not found")
-        connection.execute("UPDATE blocks SET title = ? WHERE id = ?", (title, block_id))
+        set_block_title(connection, block_id, title)
         connection.commit()
         connection.close()
         self.send_response(204)
@@ -714,12 +1111,7 @@ class Handler(BaseHTTPRequestHandler):
         connection.execute("UPDATE blocks SET source_url = ? WHERE id = ?", (link, block_id))
         connection.commit()
         connection.close()
-        data = json.dumps({"source_url": link}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self.send_json({"source_url": link})
 
     def set_note(self, values: dict[str, list[str]]) -> None:
         block_id = int(form_value(values, "block_id"))
@@ -737,13 +1129,10 @@ class Handler(BaseHTTPRequestHandler):
         channel_id = int(form_value(values, "channel_id"))
         block_id = int(form_value(values, "block_id"))
         connection = db()
-        if not connection.execute("SELECT 1 FROM channels WHERE id = ?", (channel_id,)).fetchone():
-            raise ValueError("channel not found")
+        require_channel(connection, channel_id)
         if not connection.execute("SELECT 1 FROM blocks WHERE id = ?", (block_id,)).fetchone():
             raise ValueError("block not found")
-        position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        connection.execute("INSERT OR IGNORE INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, json.dumps({"local": True, "connected_at": now})))
+        append_block(connection, channel_id, block_id)
         connection.commit()
         connection.close()
         self.send_response(204)
@@ -755,23 +1144,121 @@ class Handler(BaseHTTPRequestHandler):
         if source_id == channel_id:
             raise ValueError("a channel cannot contain itself")
         connection = db()
-        source = connection.execute("SELECT title, slug FROM channels WHERE id = ?", (source_id,)).fetchone()
-        if not source or not connection.execute("SELECT 1 FROM channels WHERE id = ?", (channel_id,)).fetchone():
-            raise ValueError("channel not found")
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        # Nested channels are 'channel' blocks that link to the channel page; reuse one if it exists.
-        existing = connection.execute("SELECT id FROM blocks WHERE type = 'channel' AND source_url = ?", (f"/channel/{source_id}",)).fetchone()
-        if existing:
-            block_id = existing["id"]
-        else:
-            block_id = local_id(connection, "blocks")
-            connection.execute("INSERT INTO blocks (id, type, title, content, description, author_name, author_slug, source_url, created_at, updated_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (block_id, "channel", source["title"] or source["slug"], "", "", "Local archive", "local", f"/channel/{source_id}", now, now, json.dumps({"local": True, "channel_id": source_id})))
-        position = connection.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchone()[0]
-        connection.execute("INSERT OR IGNORE INTO channel_blocks VALUES (?, ?, ?, ?, ?)", (channel_id, block_id, position, now, json.dumps({"local": True, "connected_at": now})))
+        require_channel(connection, channel_id)
+        # Nested channels are 'channel' blocks that link to the channel page.
+        append_block(connection, channel_id, channel_block(connection, source_id))
         connection.commit()
         connection.close()
         self.send_response(204)
         self.end_headers()
+
+    def rename_blocks(self, values: dict[str, list[str]]) -> None:
+        block_ids = form_ids(values, "block_ids")
+        titles = batch_titles(form_value(values, "title"), len(block_ids), form_value(values, "numbered") == "1")
+        connection = db()
+        for block_id, title in zip(block_ids, titles):
+            set_block_title(connection, block_id, title)
+        connection.commit()
+        connection.close()
+        self.send_json({"titles": titles})
+
+    def move_blocks(self, values: dict[str, list[str]]) -> None:
+        """Move blocks to another channel, or to a new one that can sit inside this channel."""
+        channel_id = int(form_value(values, "channel_id"))
+        block_ids = form_ids(values, "block_ids")
+        keep = form_value(values, "keep") == "1"
+        new_title = form_value(values, "new_title")
+        connection = db()
+        channel = require_channel(connection, channel_id)
+        if new_title:
+            target_id = insert_channel(connection, new_title, channel["category"])
+        else:
+            target_id = int(form_value(values, "target_id"))
+            require_channel(connection, target_id)
+            if target_id == channel_id:
+                raise ValueError("the blocks are already in this channel")
+        marks = ",".join("?" * len(block_ids))
+        rows = connection.execute(f"SELECT block_id, position FROM channel_blocks WHERE channel_id = ? AND block_id IN ({marks})", [channel_id] + block_ids).fetchall()
+        positions = {row["block_id"]: row["position"] for row in rows}
+        # A channel can't be moved into itself.
+        moved = [block_id for block_id in block_ids if block_id in positions and linked_channel(connection, block_id) != target_id]
+        for block_id in moved:
+            append_block(connection, target_id, block_id)
+        if not keep:
+            connection.executemany("DELETE FROM channel_blocks WHERE channel_id = ? AND block_id = ?", [(channel_id, block_id) for block_id in moved])
+        if new_title and form_value(values, "nest") == "1":
+            # The new channel takes the place of the first block that went into it.
+            first = min((positions[block_id] for block_id in moved), default=None) if not keep else None
+            append_block(connection, channel_id, channel_block(connection, target_id), first)
+        connection.execute("UPDATE channels SET updated_at = ? WHERE id IN (?, ?)", (timestamp(), channel_id, target_id))
+        connection.commit()
+        connection.close()
+        self.send_json({"channel_id": target_id, "moved": len(moved)})
+
+    def delete_blocks(self, values: dict[str, list[str]]) -> None:
+        """Take blocks out of a channel. A block no other channel holds is deleted with its file."""
+        channel_id = int(form_value(values, "channel_id"))
+        block_ids = form_ids(values, "block_ids")
+        connection = db()
+        for block_id in block_ids:
+            connection.execute("DELETE FROM channel_blocks WHERE channel_id = ? AND block_id = ?", (channel_id, block_id))
+            cleanup_block(connection, block_id)
+        connection.commit()
+        connection.close()
+        self.send_json({"deleted": len(block_ids)})
+
+    def rename_channels(self, values: dict[str, list[str]]) -> None:
+        channel_ids = form_ids(values, "channel_ids")
+        titles = batch_titles(form_value(values, "title"), len(channel_ids), form_value(values, "numbered") == "1")
+        connection = db()
+        for channel_id, title in zip(channel_ids, titles):
+            require_channel(connection, channel_id)
+            set_channel_title(connection, channel_id, title)
+        connection.commit()
+        connection.close()
+        self.send_json({"titles": titles})
+
+    def move_channels(self, values: dict[str, list[str]]) -> None:
+        """Nest channels inside another channel, or inside a new one."""
+        channel_ids = form_ids(values, "channel_ids")
+        new_title = form_value(values, "new_title")
+        connection = db()
+        for channel_id in channel_ids:
+            require_channel(connection, channel_id)
+        if new_title:
+            target_id = insert_channel(connection, new_title)
+        else:
+            target_id = int(form_value(values, "target_id"))
+            require_channel(connection, target_id)
+        for channel_id in channel_ids:
+            if channel_id != target_id:
+                append_block(connection, target_id, channel_block(connection, channel_id))
+        connection.execute("UPDATE channels SET updated_at = ? WHERE id = ?", (timestamp(), target_id))
+        connection.commit()
+        connection.close()
+        self.send_json({"channel_id": target_id})
+
+    def merge_channels(self, values: dict[str, list[str]]) -> None:
+        channel_ids = form_ids(values, "channel_ids")
+        if len(channel_ids) < 2:
+            raise ValueError("choose at least two channels to merge")
+        title = form_value(values, "title")
+        if not title:
+            raise ValueError("channel name cannot be empty")
+        connection = db()
+        merged_id = merge_channel_rows(connection, channel_ids, title, form_value(values, "keep") == "1")
+        connection.commit()
+        connection.close()
+        self.send_json({"channel_id": merged_id})
+
+    def delete_channels(self, values: dict[str, list[str]]) -> None:
+        channel_ids = form_ids(values, "channel_ids")
+        connection = db()
+        for channel_id in channel_ids:
+            delete_channel_rows(connection, channel_id)
+        connection.commit()
+        connection.close()
+        self.send_json({"deleted": len(channel_ids)})
 
     def upload_file(self, body: bytes, images_only: bool) -> None:
         content_type = self.headers.get("Content-Type", "")
@@ -822,12 +1309,7 @@ class Handler(BaseHTTPRequestHandler):
         rows = connection.execute("SELECT c.id, c.title, c.slug, c.category, c.favorite, c.updated_at, COUNT(cb.block_id) AS block_count FROM channels c LEFT JOIN channel_blocks cb ON cb.channel_id = c.id GROUP BY c.id ORDER BY lower(c.title)").fetchall()
         connection.close()
         channels = [{"id": row["id"], "title": row["title"] or row["slug"] or "Untitled channel", "category": row["category"] or "", "favorite": bool(row["favorite"]), "updated_at": row["updated_at"] or "", "block_count": row["block_count"]} for row in rows]
-        data = json.dumps({"channels": channels, "read_only": READ_ONLY}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self.send_json({"channels": channels, "read_only": READ_ONLY})
 
     def toggle_favorite(self, values: dict[str, list[str]]) -> None:
         channel_id = int(form_value(values, "channel_id"))
@@ -841,14 +1323,7 @@ class Handler(BaseHTTPRequestHandler):
     def delete_channel(self, values: dict[str, list[str]]) -> None:
         channel_id = int(form_value(values, "channel_id"))
         connection = db()
-        block_ids = [row[0] for row in connection.execute("SELECT block_id FROM channel_blocks WHERE channel_id = ?", (channel_id,)).fetchall()]
-        nested = [row[0] for row in connection.execute("SELECT id FROM blocks WHERE type = 'channel' AND source_url = ?", (f"/channel/{channel_id}",)).fetchall()]
-        connection.execute("DELETE FROM channel_blocks WHERE channel_id = ?", (channel_id,))
-        connection.executemany("DELETE FROM channel_blocks WHERE block_id = ?", [(block_id,) for block_id in nested])
-        connection.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
-        block_ids += nested
-        for block_id in block_ids:
-            cleanup_block(connection, block_id)
+        delete_channel_rows(connection, channel_id)
         connection.commit()
         connection.close()
         self.redirect("/")
@@ -868,7 +1343,7 @@ class Handler(BaseHTTPRequestHandler):
         categories = connection.execute("SELECT name FROM categories ORDER BY lower(name)").fetchall()
         favorites = connection.execute("SELECT id, title, slug FROM channels WHERE favorite = 1 ORDER BY lower(title)").fetchall()
         connection.close()
-        cards = "".join(f"<a class='channel-card' href='/channel/{row['id']}' data-drop-channel='{row['id']}' draggable='true' data-draggable-channel='{row['id']}'><span class='eyebrow category-chip' data-category-link data-category-url='/?sort=category&direction=asc&category={quote(row['category'] or '')}'>{'★ ' if row['favorite'] else ''}{esc(row['category'] or 'UNCATEGORIZED').upper()} · {row['block_count']} BLOCKS</span><h2>{title_markup(row['title'] or row['slug'])}</h2><p>{esc(row['description'])}</p></a>" for row in channels)
+        cards = "".join(f"<a class='channel-card' href='/channel/{row['id']}' data-drop-channel='{row['id']}' draggable='true' data-draggable-channel='{row['id']}' data-select-id='{row['id']}'><span class='eyebrow category-chip' data-category-link data-category-url='/?sort=category&direction=asc&category={quote(row['category'] or '')}'>{'★ ' if row['favorite'] else ''}{esc(row['category'] or 'UNCATEGORIZED').upper()} · {row['block_count']} BLOCKS</span><h2>{title_markup(row['title'] or row['slug'])}</h2><p>{esc(row['description'])}</p></a>" for row in channels)
         empty = '<div class="notice">No channels imported yet.</div>'
         filtered = bool(category or favorites_only)
         favorites_param = "&favorites=1" if favorites_only else ""
@@ -879,11 +1354,11 @@ class Handler(BaseHTTPRequestHandler):
         favorite_links = "".join(f"<a href='/channel/{row['id']}'>{title_markup(row['title'] or row['slug'])}</a>" for row in favorites) or "<em>Star a channel to pin it here</em>"
         category_links = "".join(f"<a class='{('active' if row['name'] == category else '')}' href='/?sort=category&direction=asc&category={quote(row['name'])}'>{esc(row['name'])}</a>" for row in categories) or "<em>No categories yet</em>"
         search = "<form method='get' action='/search' role='search' class='search-form'><label class='sr-only' for='archive-search'>Search archive</label><input id='archive-search' name='q' type='search' placeholder='Search archive' autocomplete='off'><button type='submit'>SEARCH</button></form>"
-        controls = f"<div class='view-line'><nav class='view-tabs'>{show_tabs}</nav><p class='view-label'>SORT</p><nav class='view-tabs'>{sort_tabs}</nav><p class='view-label channel-count' id='channel-count'>{len(channels)} channels</p>{search}</div>"
+        controls = f"<div class='view-line'><nav class='view-tabs'>{show_tabs}</nav><p class='view-label'>SORT</p><nav class='view-tabs'>{sort_tabs}</nav><p class='view-label channel-count' id='channel-count'>{len(channels)} channels</p>{select_button('channels')}{search}</div>"
         rows = [("SHOW", controls), ("FAVORITES", f"<div class='favorite-links'>{favorite_links}</div>"), ("CATEGORIES", f"<div class='category-links'>{category_links}</div>")]
         view = "<section class='view-panel'>" + "".join(f"<div class='view-row'><p class='view-label'>{label}</p>{content}</div>" for label, content in rows) + "</section>"
         create = "<section class='editor-panel'><p class='eyebrow'>EDITING</p><div class='editing-actions'><form method='post' action='/create-channel' class='editor-form'><input name='title' placeholder='New channel title' required><input name='description' placeholder='Description'><input name='category' placeholder='Category'><button type='submit'>CREATE CHANNEL</button></form><form method='post' action='/create-category' class='category-form'><input name='category' placeholder='New category' required><button type='submit'>CREATE CATEGORY</button></form></div></section>"
-        self.send_html(layout("Channels", f"{view}{create}<section class='channel-grid'>{cards or empty}</section>"))
+        self.send_html(layout("Channels", f"{view}{create}<section class='channel-grid' data-select-kind='channels'>{cards or empty}</section>{selection_bar('channels')}"))
 
     def view(self, query_string: str) -> None:
         self.redirect("/?" + query_string if query_string else "/")
@@ -900,6 +1375,10 @@ class Handler(BaseHTTPRequestHandler):
         connection.close()
         grid = "".join(block_card(row) for row in blocks)
         empty = '<div class="notice">No imported blocks in this channel.</div>'
+        block_view = self.cookie("block_view")
+        if block_view not in BLOCK_VIEWS:
+            block_view = BLOCK_VIEWS[0]
+        view_switch = "<div class='view-switch' role='group' aria-label='Block view'><span class='view-label'>VIEW</span>" + "".join(f"<button type='button' data-view-option='{view}' aria-pressed='{'true' if view == block_view else 'false'}'>{view.upper()}</button>" for view in BLOCK_VIEWS) + "</div>"
         category_options = "<option value=''>Uncategorized</option>" + "".join(f"<option value='{esc(row['name'])}'{' selected' if row['name'] == channel['category'] else ''}>{esc(row['name'])}</option>" for row in categories)
         target_cards = "".join(f"<div class='drop-channel' data-drop-channel='{row['id']}'><span>{esc(row['category'] or 'UNCATEGORIZED').upper()}</span><strong>{title_markup(row['title'])}</strong></div>" for row in targets)
         drop_shelf = f"<details class='drop-shelf'><summary>DRAG TO ADD TO ANOTHER CHANNEL</summary><input class='drop-search' type='search' placeholder='Find a channel' oninput=\"this.parentElement.querySelectorAll('[data-drop-channel]').forEach((card) => card.hidden = !card.textContent.toLowerCase().includes(this.value.toLowerCase()))\"><div class='drop-channel-grid'>{target_cards}</div></details>"
@@ -907,7 +1386,7 @@ class Handler(BaseHTTPRequestHandler):
         favorite_label = "★ FAVORITE" if channel["favorite"] else "☆ ADD TO FAVORITES"
         favorite = f"<form method='post' action='/toggle-favorite'><input type='hidden' name='channel_id' value='{channel_id}'><button class='favorite-button{' is-favorite' if channel['favorite'] else ''}' type='submit' title='{'Remove from favorites' if channel['favorite'] else 'Add to favorites'}'>{favorite_label}</button></form>"
         delete = f"<form method='post' action='/delete-channel' onsubmit=\"return confirm('Delete this local channel?')\"><input type='hidden' name='channel_id' value='{channel_id}'><button class='danger-button' type='submit'>DELETE CHANNEL</button></form>"
-        body = f"<a class='back' href='/'>← BACK</a><section class='channel-heading'><p class='eyebrow'>CHANNEL · {esc(channel['visibility'] or 'UNKNOWN').upper()}</p><h1>{title_markup(channel['title'] or channel['slug'])}</h1><p>{esc(channel['description'])}</p><div class='channel-actions'>{favorite}{delete}</div></section>{drop_shelf}{editor}<section class='block-grid' data-drop-channel='{channel_id}'>{grid or empty}</section>"
+        body = f"<a class='back' href='/'>← BACK</a><section class='channel-heading'><p class='eyebrow'>CHANNEL · {esc(channel['visibility'] or 'UNKNOWN').upper()}</p><h1>{title_markup(channel['title'] or channel['slug'])}</h1><p>{esc(channel['description'])}</p><div class='channel-actions'>{favorite}{select_button('blocks')}{delete}</div></section>{drop_shelf}{editor}{view_switch}<section class='block-grid' data-view='{block_view}' data-drop-channel='{channel_id}' data-select-kind='blocks'>{grid or empty}</section>{selection_bar('blocks')}"
         self.send_html(layout(channel["title"], body))
 
     def search(self, query: str) -> None:

@@ -87,6 +87,31 @@ Local editing is grouped in one `EDITING` area. It supports creating channels,
 creating categories, adding text/link blocks, removing blocks from channels, and
 deleting channels. These operations affect the local archive only.
 
+### Selection
+
+Blocks on a channel page and channel cards on the main page can be selected
+together. `SELECT BLOCKS` / `SELECT CHANNELS` starts selecting. ⌘-click also
+starts it, and shift-click selects a range. Selected items get an ink outline
+and an accent check. A black bar pinned to the bottom of the window shows the
+count and the actions:
+
+- `RENAME` gives every item one name, numbered in order when more than one is
+  selected. `#` in the name marks where the number goes.
+- `MOVE TO…` picks an existing channel, or makes a new one from the typed
+  name. Blocks can leave this channel or stay in it too, and a new channel can
+  sit inside this one where the first moved block was. Channels are nested
+  inside the chosen channel and stay on the main page.
+- `MERGE` (channels only) puts every block of the selected channels into one
+  new, named channel, in order and without duplicates. The new channel takes
+  the originals' place wherever they were nested. The originals are deleted
+  unless kept.
+- `DELETE` asks first, with focus on `CANCEL`. A block that another channel
+  still holds is only taken out of this one.
+
+`⌘A` selects everything visible, `Delete` asks to delete the selection, and
+`Escape` stops selecting. Actions run in a small paper dialog, never in
+`prompt()`, because the Mac app's web view does not show one.
+
 ## Interaction Rules
 
 - Prefer direct navigation over hidden state.

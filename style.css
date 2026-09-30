@@ -64,4 +64,98 @@ body.page-drop::after { content: 'DROP TO ADD TO THIS CHANNEL'; position: fixed;
 .modal-panel .block-preview { object-fit: contain; object-position: center; }
 /* In the modal the name is already an editable field below the preview. */
 .modal-panel .block-preview ~ strong { display: none; }
+/* Block views on a channel page. Scoped to the grid, so the modal always shows the full block. */
+.view-switch { display: flex; align-items: baseline; gap: 12px; margin-top: 22px; }
+.view-switch .view-label { margin-right: 6px; }
+.view-switch button { border: 0; background: transparent; padding: 1px 0; color: var(--muted); font: 11px monospace; letter-spacing: .06em; cursor: pointer; }
+.view-switch button:hover { color: var(--ink); background: var(--accent); }
+.view-switch button[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
+.view-switch + .block-grid { margin-top: 14px; }
+
+/* Small: the full card, five or six to a row. */
+.block-grid[data-view="small"] { columns: 6 170px; column-gap: 12px; }
+.block-grid[data-view="small"] .block { margin-bottom: 20px; }
+.block-grid[data-view="small"] .block-visual { min-height: 80px; }
+.block-grid[data-view="small"] .text-block { padding: 12px; font-size: 12px; max-height: 240px; overflow: hidden; }
+.block-grid[data-view="small"] .empty-block, .block-grid[data-view="small"] .channel-block, .block-grid[data-view="small"] .download-block { min-height: 100px; padding: 12px; }
+.block-grid[data-view="small"] .empty-block strong, .block-grid[data-view="small"] .channel-block strong { font-size: 15px; }
+.block-grid[data-view="small"] .download-block strong { margin-top: 30px; font-size: 14px; }
+.block-grid[data-view="small"] .block-meta { flex-wrap: wrap; gap: 2px 8px; font-size: 8px; padding-top: 6px; }
+.block-grid[data-view="small"] h3 { font-size: 12px; }
+.block-grid[data-view="small"] .block-note { font-size: 11px; }
+.block-grid[data-view="small"] .block-remove { top: 6px; right: 6px; }
+
+/* Stack: small rectangles with a thumbnail and the name. */
+.block-grid[data-view="stack"] { columns: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 6px; }
+.block-grid[data-view="stack"] .block { display: grid; grid-template-columns: 52px minmax(0, 1fr); grid-template-rows: 1fr 1fr; column-gap: 12px; margin: 0; padding: 6px; border: 1px solid var(--line); background: var(--paper); }
+.block-grid[data-view="stack"] .block:hover { border-color: var(--ink); }
+.block-grid[data-view="stack"] .block-visual { grid-row: 1 / 3; width: 52px; height: 52px; min-height: 0; }
+.block-grid[data-view="stack"] .block-visual img { width: 100%; height: 100%; object-fit: cover; }
+.block-grid[data-view="stack"] .text-block { height: 100%; padding: 5px; font-size: 6px; line-height: 1.3; overflow: hidden; }
+.block-grid[data-view="stack"] .empty-block, .block-grid[data-view="stack"] .channel-block, .block-grid[data-view="stack"] .download-block { height: 100%; min-height: 0; padding: 0; font-size: 0; }
+.block-grid[data-view="stack"] .empty-block > *, .block-grid[data-view="stack"] .channel-block > *, .block-grid[data-view="stack"] .download-block > strong { display: none; }
+.block-grid[data-view="stack"] h3 { grid-column: 2; grid-row: 1; align-self: end; font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; overflow-wrap: normal; }
+.block-grid[data-view="stack"] h3:empty::before { content: "Untitled"; color: var(--muted); }
+.block-grid[data-view="stack"] .block-meta { grid-column: 2; grid-row: 2; align-self: start; padding: 4px 0 0; overflow: hidden; white-space: nowrap; }
+.block-grid[data-view="stack"] .block-meta > :not(:first-child), .block-grid[data-view="stack"] .block-note, .block-grid[data-view="stack"] .block-remove { display: none; }
+.selecting .block-grid[data-view="stack"] .block-visual::after { top: 4px; left: 4px; width: 16px; height: 16px; font-size: 10px; }
+.block-grid[data-view="stack"] .block.is-selected { border-color: var(--ink); background: var(--accent); }
+@media (max-width: 600px) { .block-grid[data-view="small"] { columns: 3 100px; column-gap: 8px; } .block-grid[data-view="stack"] { grid-template-columns: 1fr; } }
 .update-button { border: 1px solid var(--line); background: transparent; color: var(--muted); padding: 5px 8px; margin: -6px 0; font: 10px monospace; letter-spacing: .1em; cursor: pointer; }.update-button:hover { border-color: var(--ink); color: var(--ink); }.update-button[data-state="available"] { background: var(--accent); border-color: var(--ink); color: var(--ink); }.update-button[data-state="available"]:hover { background: var(--ink); color: var(--accent); }.update-button[data-state="checking"], .update-button[data-state="updating"] { cursor: default; }.update-button[data-state="error"] { border-style: dashed; }
+
+/* Selecting blocks and channels for batch actions */
+.select-button { border: 1px solid var(--ink); background: transparent; padding: 10px 12px; font: 10px monospace; letter-spacing: .08em; cursor: pointer; }
+.select-button:hover, .select-button[aria-pressed="true"] { background: var(--accent); }
+.view-line > .select-button { padding: 7px 10px; align-self: center; }
+.selecting .block-grid, .selecting .channel-grid { user-select: none; -webkit-user-select: none; }
+.selecting .block, .selecting .channel-card { cursor: pointer; }
+.selecting .block-remove { display: none; }
+.selecting .channel-card:hover { transform: none; }
+.channel-card { position: relative; }
+.selecting .block .block-visual::after, .selecting .channel-card::after { content: ''; position: absolute; top: 10px; left: 10px; z-index: 3; width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--ink); background: var(--paper); font: 700 12px monospace; }
+.selecting .channel-card::after { left: auto; right: 12px; top: 12px; }
+.block.is-selected .block-visual::after, .channel-card.is-selected::after { content: '✓'; background: var(--accent); }
+.block.is-selected .block-visual { outline: 3px solid var(--ink); outline-offset: -3px; }
+.channel-card.is-selected { background: var(--accent); outline: 2px solid var(--ink); outline-offset: -6px; }
+.selection-bar { position: fixed; left: 0; right: 0; bottom: 20px; z-index: 15; width: max-content; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: calc(100% - 32px); padding: 6px; background: var(--ink); color: var(--paper); font: 10px monospace; letter-spacing: .08em; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+.selection-bar[hidden] { display: none; }
+.selection-count { padding: 0 10px 0 8px; white-space: nowrap; }
+.selection-bar button { border: 1px solid #444; background: transparent; color: var(--paper); padding: 9px 10px; font: inherit; letter-spacing: inherit; cursor: pointer; }
+.selection-bar button:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--ink); }
+.selection-bar button.danger:hover:not(:disabled) { background: #b91919; border-color: #b91919; color: var(--paper); }
+.selection-bar button:disabled { opacity: .35; cursor: default; }
+body.selecting main { padding-bottom: 140px; }
+.batch-dialog { width: min(520px, calc(100% - 32px)); max-height: calc(100vh - 48px); padding: 0; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); box-shadow: 0 20px 80px rgba(0,0,0,.25); }
+.batch-dialog::backdrop { background: rgba(17,17,17,.55); backdrop-filter: blur(6px); }
+.batch-dialog form { display: flex; flex-direction: column; gap: 14px; padding: 26px; }
+.batch-dialog .eyebrow { margin: 0; }
+.batch-field { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font: 700 10px Arial, Helvetica, sans-serif; letter-spacing: .13em; text-transform: uppercase; }
+.batch-field input, .batch-search { width: 100%; padding: 8px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font: 700 20px Arial, Helvetica, sans-serif; letter-spacing: -.02em; text-transform: none; }
+.batch-search { font-size: 15px; font-weight: 400; }
+.batch-field input:focus, .batch-search:focus { outline: 0; border-bottom-color: var(--ink); }
+.batch-check { display: flex; gap: 8px; align-items: baseline; font-size: 12px; line-height: 1.4; cursor: pointer; }
+.batch-check[hidden] { display: none; }
+.batch-check input { flex: none; width: auto; margin: 0; padding: 0; accent-color: var(--ink); }
+.batch-check b { font-family: monospace; }
+.batch-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.batch-question { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.03em; }
+.batch-error { margin: 0; color: #b91919; font-size: 12px; }
+.batch-error[hidden] { display: none; }
+.batch-targets { display: flex; flex-direction: column; max-height: 280px; overflow: auto; border-top: 1px solid var(--line); }
+.batch-targets [role=option] { display: block; width: 100%; padding: 9px 10px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.batch-targets [role=option] span { display: block; color: var(--muted); font: 9px monospace; letter-spacing: .06em; }
+.batch-targets [role=option] strong { display: block; margin-top: 3px; font-size: 14px; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.batch-targets [role=option]:hover { background: #e9e9e3; }
+.batch-targets [role=option][aria-selected="true"] { background: var(--accent); outline: 1px solid var(--ink); outline-offset: -1px; }
+.batch-targets .batch-new span { color: var(--ink); }
+.batch-targets .batch-hint { padding: 10px 0; }
+.batch-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.batch-actions button { border: 1px solid var(--ink); background: transparent; padding: 10px 12px; font: 10px monospace; letter-spacing: .08em; cursor: pointer; }
+.batch-actions button:hover:not(:disabled) { background: var(--accent); }
+.batch-actions button.danger { background: var(--ink); color: var(--paper); }
+.batch-actions button.danger:hover:not(:disabled) { background: #b91919; border-color: #b91919; }
+.batch-actions button:disabled { opacity: .4; cursor: default; }
+/* Selection in the stack view: mark the whole row, with a smaller check on the thumbnail. */
+.selecting .block-grid[data-view="stack"] .block .block-visual::after { top: 2px; left: 2px; width: 16px; height: 16px; font-size: 10px; }
+.block-grid[data-view="stack"] .block.is-selected { background: var(--accent); border-color: var(--ink); outline: 1px solid var(--ink); outline-offset: -1px; }
+.block-grid[data-view="stack"] .block.is-selected .block-visual { outline: 0; }
