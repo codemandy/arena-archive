@@ -41,13 +41,31 @@ def layout(title: str, body: str) -> str:
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>{esc(title)} · CHANNEL</title><link rel='stylesheet' href='/style.css'></head>
-<body><header class='topbar'><a class='wordmark' href='/'>CHANNEL</a><nav class='main-nav'><a href='/'>CHANNEL</a></nav></header>
+<body><header class='topbar'><a class='wordmark' href='/'>CHANNEL</a><nav class='main-nav'><a href='/'>CHANNEL</a><button class='update-button' id='update-button' type='button' hidden>CHECK FOR UPDATES</button></nav></header>
 <main>{body}</main><div class='modal' id='post-modal' hidden role='dialog' aria-modal='true' aria-label='Post detail'>
 <div class='modal-backdrop' data-close-modal></div><section class='modal-panel'>
 <button class='modal-close' type='button' data-close-modal aria-label='Close post'>CLOSE ×</button>
 <div class='modal-zoom' aria-label='Image zoom'><button type='button' data-zoom='out'>−</button><button type='button' data-zoom='reset'>100%</button><button type='button' data-zoom='in'>+</button></div>
 <div id='modal-content'></div></section></div>
 <script>
+// Update button: only inside the Mac app, which answers through window.channelUpdate.
+const updateButton = document.getElementById('update-button');
+const appBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.channel;
+if (updateButton && appBridge) {{
+  updateButton.hidden = false;
+  const labels = {{ checking: 'CHECKING…', current: 'UP TO DATE', error: 'CAN’T CHECK', updating: 'UPDATING…' }};
+  window.channelUpdate = (update) => {{
+    updateButton.dataset.state = update.state;
+    updateButton.textContent = update.state === 'available' ? `UPDATE · ${{update.count}} NEW` : labels[update.state] || 'CHECK FOR UPDATES';
+    updateButton.title = update.detail || '';
+  }};
+  updateButton.addEventListener('click', () => {{
+    const state = updateButton.dataset.state;
+    if (state === 'checking' || state === 'updating') return;
+    appBridge.postMessage({{ action: state === 'available' ? 'update' : 'check' }});
+  }});
+  appBridge.postMessage({{ action: 'status' }});
+}}
 const readOnly = {'true' if READ_ONLY else 'false'};
 const modal = document.getElementById('post-modal');
 const modalContent = document.getElementById('modal-content');

@@ -26,8 +26,11 @@ and remembers the folder. Use File › Choose Archive Folder… (⌘O) to switch
 
 ### Updating
 
-Push changes from the Mac where you made them. Then, on each other Mac,
-choose **CHANNEL › Update CHANNEL…**, or run:
+Push changes from the Mac where you made them. The button at the top right of
+the archive window checks GitHub when you open the app (at most every 10
+minutes) and when you click it. When there are new commits it turns yellow and
+says how many, and clicking it runs the update. You can also choose
+**CHANNEL › Update CHANNEL…**, or run:
 
 ```bash
 ./mac/update.sh

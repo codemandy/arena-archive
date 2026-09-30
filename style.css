@@ -64,3 +64,4 @@ body.page-drop::after { content: 'DROP TO ADD TO THIS CHANNEL'; position: fixed;
 .modal-panel .block-preview { object-fit: contain; object-position: center; }
 /* In the modal the name is already an editable field below the preview. */
 .modal-panel .block-preview ~ strong { display: none; }
+.update-button { border: 1px solid var(--line); background: transparent; color: var(--muted); padding: 5px 8px; margin: -6px 0; font: 10px monospace; letter-spacing: .1em; cursor: pointer; }.update-button:hover { border-color: var(--ink); color: var(--ink); }.update-button[data-state="available"] { background: var(--accent); border-color: var(--ink); color: var(--ink); }.update-button[data-state="available"]:hover { background: var(--ink); color: var(--accent); }.update-button[data-state="checking"], .update-button[data-state="updating"] { cursor: default; }.update-button[data-state="error"] { border-style: dashed; }

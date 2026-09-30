@@ -182,6 +182,59 @@ enum AppVersion {
     }
 }
 
+/// What the update button in the page shows.
+struct UpdateStatus: Codable {
+    var state: String  // checking, current, available, error, updating
+    var count = 0
+    var detail = ""
+    var dirty = false
+}
+
+func runGit(_ arguments: [String], in repo: URL, timeout: TimeInterval = 30) -> (ok: Bool, output: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = ["-C", repo.path] + arguments
+    var environment = ProcessInfo.processInfo.environment
+    environment["GIT_TERMINAL_PROMPT"] = "0"  // never hang on a password prompt
+    process.environment = environment
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = output
+    guard (try? process.run()) != nil else { return (false, "git is not installed") }
+    let deadline = Date().addingTimeInterval(timeout)
+    while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+    if process.isRunning {
+        process.terminate()
+        return (false, "timed out")
+    }
+    let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    return (process.terminationStatus == 0, text.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+/// Fetches from GitHub and counts commits the installed build doesn't have yet.
+/// That also catches a pull that was never rebuilt.
+func checkForUpdates() -> UpdateStatus {
+    guard let repo = AppVersion.sourcePath, fm.fileExists(atPath: repo.appendingPathComponent(".git").path) else {
+        return UpdateStatus(state: "error", detail: "Can't find the project folder this app was built from.")
+    }
+    let fetch = runGit(["fetch", "--quiet"], in: repo)
+    guard fetch.ok else {
+        return UpdateStatus(state: "error", detail: "Couldn't reach GitHub: \(fetch.output.split(separator: "\n").last ?? "")")
+    }
+    let upstream = runGit(["rev-parse", "--abbrev-ref", "@{u}"], in: repo).output
+    let installed = runGit(["cat-file", "-e", "\(AppVersion.commit)^{commit}"], in: repo).ok ? AppVersion.commit : "HEAD"
+    let count = Int(runGit(["rev-list", "--count", "\(installed)..@{u}"], in: repo).output) ?? 0
+    let dirty = !runGit(["status", "--porcelain", "--untracked-files=no"], in: repo).output.isEmpty
+    let time = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
+    guard count > 0 else {
+        return UpdateStatus(state: "current", detail: "Build \(AppVersion.build) (\(AppVersion.commit)) is the latest on \(upstream). Checked \(time).", dirty: dirty)
+    }
+    let changes = runGit(["log", "--format=• %s", "-8", "\(installed)..@{u}"], in: repo).output
+    var detail = "\(count) new on \(upstream):\n\(changes)"
+    if dirty { detail += "\n\nThe project folder has uncommitted changes. Commit or stash them before updating." }
+    return UpdateStatus(state: "available", count: count, detail: detail, dirty: dirty)
+}
+
 struct VersionRecord: Codable {
     let machineID: String
     let machineName: String
@@ -382,7 +435,7 @@ final class Server {
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     var window: NSWindow!
     let webView = ArchiveWebView(frame: .zero, configuration: WKWebViewConfiguration())
     let status = NSTextField(labelWithString: "Opening archive…")
@@ -393,10 +446,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var titleObservation: NSKeyValueObservation?
     var menuBar: MenuBarController!
     let work = DispatchQueue(label: "archive.sync")
+    var updateStatus: UpdateStatus?
+    var updateCheckedAt: Date?
+    var checkingForUpdates = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = makeMenu()
         makeWindow()
+        webView.configuration.userContentController.add(self, name: "channel")
         menuBar = MenuBarController(archiveURL: { [weak self] in self?.server?.url },
                                     showArchive: { [weak self] in self?.showArchive(channel: $0) },
                                     archiveChanged: { [weak self] in self?.archiveChanged(channel: $0) })
@@ -629,6 +686,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // MARK: Updates
 
+    /// Messages from the page's update button: status (cached for 10 minutes),
+    /// check (always asks GitHub), update (runs mac/update.sh).
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
+        switch action {
+        case "status":
+            if let updateStatus, let updateCheckedAt, Date().timeIntervalSince(updateCheckedAt) < 600 {
+                sendUpdateStatus(updateStatus)
+            } else {
+                refreshUpdateStatus()
+            }
+        case "check":
+            refreshUpdateStatus()
+        case "update":
+            if updateStatus?.dirty == true {
+                showAlert("Commit your changes first", "The project folder has uncommitted changes, so the update would stop. Commit and push them (or stash them), then update.")
+            } else {
+                confirmUpdate()
+            }
+        default:
+            break
+        }
+    }
+
+    func refreshUpdateStatus() {
+        guard !checkingForUpdates else { return sendUpdateStatus(UpdateStatus(state: "checking")) }
+        checkingForUpdates = true
+        sendUpdateStatus(UpdateStatus(state: "checking"))
+        DispatchQueue.global(qos: .utility).async {
+            let status = checkForUpdates()
+            DispatchQueue.main.async {
+                self.checkingForUpdates = false
+                self.updateStatus = status
+                self.updateCheckedAt = Date()
+                self.sendUpdateStatus(status)
+            }
+        }
+    }
+
+    func sendUpdateStatus(_ status: UpdateStatus) {
+        guard let data = try? JSONEncoder().encode(status), let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.channelUpdate && window.channelUpdate(\(json))")
+    }
+
     func showUpdateNotice(_ newer: VersionRecord) {
         let alert = NSAlert()
         alert.messageText = "“\(newer.machineName)” has a newer CHANNEL"
@@ -663,6 +764,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         terminal.arguments = ["-a", "Terminal", script.path]
         do {
             try terminal.run()
+            sendUpdateStatus(UpdateStatus(state: "updating"))
         } catch {
             showAlert("Could not start the update", error.localizedDescription)
         }
@@ -1041,6 +1143,13 @@ enum Main {
         let arguments = CommandLine.arguments
         if arguments.count == 3 && arguments[1] == "--make-icon" {
             try makeIconSet(at: URL(fileURLWithPath: arguments[2]))
+            exit(0)
+        }
+        // Prints what the update button would show, e.g. for troubleshooting.
+        if arguments.count == 2 && arguments[1] == "--check-updates" {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            print(String(decoding: try encoder.encode(checkForUpdates()), as: UTF8.self))
             exit(0)
         }
 
